@@ -127,6 +127,42 @@ class PackagingTests(unittest.TestCase):
             app.release_single_instance()
 
 
+class GeometryTests(unittest.TestCase):
+    def test_negative_monitor_coordinates_are_preserved(self):
+        self.assertEqual(
+            app.clamp_to_area(-1500, 100, 300, 400, (-1920, 0, 0, 1080)),
+            (-1500, 100),
+        )
+
+    def test_window_is_clamped_to_its_monitor_work_area(self):
+        self.assertEqual(
+            app.clamp_to_area(-2100, 900, 300, 400, (-1920, 0, 0, 1080)),
+            (-1920, 680),
+        )
+
+    @unittest.skipUnless(os.name == "nt", "Windows monitor bounds")
+    def test_monitor_bounds_include_the_taskbar(self):
+        bounds = app.monitor_bounds_at(100, 100)
+        work = app.work_area_at(100, 100)
+        self.assertIsNotNone(bounds)
+        self.assertIsNotNone(work)
+        self.assertLessEqual(bounds[0], work[0])
+        self.assertLessEqual(bounds[1], work[1])
+        self.assertGreaterEqual(bounds[2], work[2])
+        self.assertGreaterEqual(bounds[3], work[3])
+
+    @unittest.skipUnless(os.name == "nt", "Windows taskbar")
+    def test_native_taskbar_rectangle_is_discovered(self):
+        hwnd = app.U.FindWindowW("Shell_TrayWnd", None)
+        self.assertTrue(hwnd)
+        rect = app.wintypes.RECT()
+        self.assertTrue(app.U.GetWindowRect(hwnd, app.ctypes.byref(rect)))
+        found = app.taskbar_for_rect(rect.left, rect.top,
+                                     rect.right - rect.left,
+                                     rect.bottom - rect.top)
+        self.assertEqual(int(found), int(hwnd))
+
+
 class ModuleStateTests(unittest.TestCase):
     """Per-module open/position state, including the pre-module migration."""
 

@@ -717,6 +717,20 @@ if os.name == "nt":
     U.SystemParametersInfoW.argtypes = (wintypes.UINT, wintypes.UINT,
                                         wintypes.LPVOID, wintypes.UINT)
     U.SystemParametersInfoW.restype = wintypes.BOOL
+    U.MonitorFromPoint.argtypes = (wintypes.POINT, wintypes.DWORD)
+    U.MonitorFromPoint.restype = wintypes.HANDLE
+    U.FindWindowW.argtypes = (wintypes.LPCWSTR, wintypes.LPCWSTR)
+    U.FindWindowW.restype = wintypes.HWND
+    U.FindWindowExW.argtypes = (wintypes.HWND, wintypes.HWND,
+                                wintypes.LPCWSTR, wintypes.LPCWSTR)
+    U.FindWindowExW.restype = wintypes.HWND
+    U.GetWindowRect.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.RECT))
+    U.GetWindowRect.restype = wintypes.BOOL
+    U.SetWindowLongPtrW.argtypes = (wintypes.HWND, ctypes.c_int,
+                                    ctypes.c_ssize_t)
+    U.SetWindowLongPtrW.restype = ctypes.c_ssize_t
+    U.GetMonitorInfoW.argtypes = (wintypes.HANDLE, wintypes.LPVOID)
+    U.GetMonitorInfoW.restype = wintypes.BOOL
     U.MessageBoxW.argtypes = (wintypes.HWND, wintypes.LPCWSTR,
                               wintypes.LPCWSTR, wintypes.UINT)
     U.MessageBoxW.restype = ctypes.c_int
@@ -752,10 +766,63 @@ def work_area():
         return None
 
 
+class MONITORINFO(ctypes.Structure):
+    _fields_ = [("cbSize", wintypes.DWORD),
+                ("rcMonitor", wintypes.RECT),
+                ("rcWork", wintypes.RECT),
+                ("dwFlags", wintypes.DWORD)]
+
+
+MONITOR_DEFAULTTONEAREST = 2
+
+
+def work_area_at(x, y):
+    """Work area of the monitor nearest a virtual-screen coordinate."""
+    if os.name != "nt":
+        return None
+    try:
+        monitor = U.MonitorFromPoint(wintypes.POINT(int(x), int(y)),
+                                     MONITOR_DEFAULTTONEAREST)
+        info = MONITORINFO()
+        info.cbSize = ctypes.sizeof(info)
+        if monitor and U.GetMonitorInfoW(monitor, ctypes.byref(info)):
+            r = info.rcWork
+            return r.left, r.top, r.right, r.bottom
+    except (AttributeError, OSError, ValueError):
+        pass
+    return work_area()
+
+
+def monitor_bounds_at(x, y):
+    """Full bounds of the monitor, including its taskbar area."""
+    if os.name != "nt":
+        return None
+    try:
+        monitor = U.MonitorFromPoint(wintypes.POINT(int(x), int(y)),
+                                     MONITOR_DEFAULTTONEAREST)
+        info = MONITORINFO()
+        info.cbSize = ctypes.sizeof(info)
+        if monitor and U.GetMonitorInfoW(monitor, ctypes.byref(info)):
+            r = info.rcMonitor
+            return r.left, r.top, r.right, r.bottom
+    except (AttributeError, OSError, ValueError):
+        pass
+    return None
+
+
+def clamp_to_area(x, y, width, height, area):
+    """Keep a full window inside one monitor work area."""
+    left, top, right, bottom = area
+    max_x = max(left, right - width)
+    max_y = max(top, bottom - height)
+    return max(left, min(int(x), max_x)), max(top, min(int(y), max_y))
+
+
 _INSTANCE_HANDLE = None
 
 
 GA_ROOT = 2
+GWLP_HWNDPARENT = -8
 HWND_TOPMOST = -1
 SWP_NOSIZE = 0x0001
 SWP_NOMOVE = 0x0002
@@ -789,6 +856,41 @@ def pin_topmost(widget):
                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
     except (AttributeError, OSError, ValueError, tk.TclError):
         pass
+
+
+def taskbar_for_rect(x, y, width, height):
+    """Return the primary or secondary taskbar intersecting a window rect."""
+    if os.name != "nt":
+        return None
+    try:
+        for class_name in ("Shell_TrayWnd", "Shell_SecondaryTrayWnd"):
+            hwnd = U.FindWindowW(class_name, None)
+            while True:
+                if not hwnd:
+                    break
+                rect = wintypes.RECT()
+                if U.GetWindowRect(hwnd, ctypes.byref(rect)):
+                    if (int(x) < rect.right and int(x) + int(width) > rect.left
+                            and int(y) < rect.bottom
+                            and int(y) + int(height) > rect.top):
+                        return hwnd
+                hwnd = U.FindWindowExW(None, hwnd, class_name, None)
+    except (AttributeError, OSError, ValueError):
+        pass
+    return None
+
+
+def set_window_owner(widget, owner):
+    """Keep a top-level overlay above a native owner such as the taskbar."""
+    if os.name != "nt":
+        return True
+    try:
+        ctypes.set_last_error(0)
+        previous = U.SetWindowLongPtrW(_hwnd(widget), GWLP_HWNDPARENT,
+                                       int(owner or 0))
+        return bool(previous or ctypes.get_last_error() == 0)
+    except (AttributeError, OSError, ValueError, tk.TclError):
+        return False
 
 
 def force_foreground(widget):
@@ -906,30 +1008,18 @@ class Tooltip(tk.Toplevel):
         self.update_idletasks()
 
         w, h = self.winfo_reqwidth(), self.winfo_reqheight()
-        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
         x = anchor.winfo_rootx() + (anchor.winfo_width() - w) // 2
         y = anchor.winfo_rooty() - h - 6
-        if y < 0:                        # bar docked at the top of the screen
+        area = work_area_at(anchor.winfo_rootx(), anchor.winfo_rooty()) or (
+            0, 0, self.winfo_screenwidth(), self.winfo_screenheight())
+        if y < area[1]:                  # bar docked at the top of its screen
             y = anchor.winfo_rooty() + anchor.winfo_height() + 6
-        self.geometry("%dx%d+%d+%d" % (w, h, max(2, min(x, sw - w - 2)),
-                                       max(2, min(y, sh - h - 2))))
+        left, top, right, bottom = area
+        x, y = clamp_to_area(x, y, w, h,
+                             (left + 2, top + 2, right - 2, bottom - 2))
+        self.geometry("%dx%d+%d+%d" % (w, h, x, y))
         self.deiconify()
         pin_topmost(self)
-
-
-class Scrim(tk.Toplevel):
-    """A full-screen invisible catcher, so a click anywhere shuts the menu."""
-
-    def __init__(self, app, on_click):
-        super().__init__(app)
-        self.overrideredirect(True)
-        self.attributes("-topmost", True)
-        self.attributes("-alpha", 0.01)
-        self.configure(bg="#000000")
-        self.geometry("%dx%d+0+0" % (self.winfo_screenwidth(),
-                                     self.winfo_screenheight()))
-        for ev in ("<Button-1>", "<Button-2>", "<Button-3>"):
-            self.bind(ev, lambda e: on_click())
 
 
 class PopMenu(tk.Toplevel):
@@ -958,8 +1048,6 @@ class PopMenu(tk.Toplevel):
         self.attributes("-topmost", True)
         self.configure(bg=MENU_EDGE)          # the 1px border is this showing
 
-        self.scrim = Scrim(app, self.close)
-
         body = tk.Frame(self, bg=MENU_BG)
         w = MENU_W
         yy = MENU_PAD_Y
@@ -980,9 +1068,10 @@ class PopMenu(tk.Toplevel):
         self._open(x, y, w + 2, yy + 2)
         self.deiconify()                 # only now does it appear, in place
         self.lift()
-        pin_topmost(self.scrim)          # order matters: scrim first, then
-        pin_topmost(self)                # the menu, so clicks reach the menu
+        pin_topmost(self)
         self.bind("<Escape>", lambda e: self.close())
+        self.bind("<FocusOut>", self._focus_out)
+        force_foreground(self)
         self.focus_force()
 
     # -- rows ---------------------------------------------------------------
@@ -1056,10 +1145,25 @@ class PopMenu(tk.Toplevel):
     # -- lifecycle ----------------------------------------------------------
 
     def _open(self, x, y, w, h):
-        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        if y + h > sh - 4:              # the bar usually lives at the bottom
-            y = max(4, y - h)
-        self.geometry("%dx%d+%d+%d" % (w, h, max(4, min(x, sw - w - 4)), y))
+        area = work_area_at(x, y) or (0, 0, self.winfo_screenwidth(),
+                                      self.winfo_screenheight())
+        left, top, right, bottom = area
+        if y + h > bottom - 4:           # the bar usually lives at the bottom
+            y = y - h
+        x, y = clamp_to_area(x, y, w, h,
+                             (left + 4, top + 4, right - 4, bottom - 4))
+        self.geometry("%dx%d+%d+%d" % (w, h, x, y))
+
+    def _focus_out(self, _event):
+        self.after_idle(self._close_if_unfocused)
+
+    def _close_if_unfocused(self):
+        try:
+            focused = self.focus_get()
+            if focused is None or focused.winfo_toplevel() is not self:
+                self.close()
+        except tk.TclError:
+            pass
 
     def fire(self, cmd):
         self.close()
@@ -1069,11 +1173,10 @@ class PopMenu(tk.Toplevel):
     def close(self):
         if getattr(self.app, "pop", None) is self:
             self.app.pop = None
-        for win in (self.scrim, self):
-            try:
-                win.destroy()
-            except tk.TclError:
-                pass
+        try:
+            self.destroy()
+        except tk.TclError:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -1303,24 +1406,29 @@ class Module(tk.Toplevel):
         self.attributes("-alpha", 1.0 if self.ghost else self.db["alpha"])
 
     def place_docked(self, x, bar_y, above):
-        sh = self.winfo_screenheight()
-        room = (bar_y - BAR_GAP) if above else (sh - bar_y - BAR_H - BAR_GAP)
+        area = work_area_at(x, bar_y) or (0, 0, self.winfo_screenwidth(),
+                                         self.winfo_screenheight())
+        left, top, right, bottom = area
+        room = ((bar_y - top - BAR_GAP) if above
+                else (bottom - bar_y - BAR_H - BAR_GAP))
         self._fit(room)
         y = (bar_y - BAR_GAP - self.win_h) if above else (bar_y + BAR_H + BAR_GAP)
-        self._show_at(x, y)
+        self._show_at(x, y, area)
 
     def place_floating(self):
         x, y = self.state["pos"]
-        self._fit(self.winfo_screenheight() - 2 * BAR_GAP)
-        self._show_at(x, y)
+        area = work_area_at(x + self.win_w // 2, y) or (
+            0, 0, self.winfo_screenwidth(), self.winfo_screenheight())
+        self._fit(area[3] - area[1] - 2 * BAR_GAP)
+        self._show_at(x, y, area)
 
     def _fit(self, room):
         self._resize_viewport(min(self.content_h, max(60, room - self.hdr_h)))
 
-    def _show_at(self, x, y):
-        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        x = max(0, min(int(x), sw - self.win_w))
-        y = max(0, min(int(y), sh - self.win_h))
+    def _show_at(self, x, y, area=None):
+        area = area or work_area_at(x, y) or (
+            0, 0, self.winfo_screenwidth(), self.winfo_screenheight())
+        x, y = clamp_to_area(x, y, self.win_w, self.win_h, area)
         # geometry before deiconify: a window being mapped this same pass can
         # swallow a position set afterwards and come up at 0,0 instead
         self.geometry("%dx%d+%d+%d" % (self.win_w, self.win_h, x, y))
@@ -2043,6 +2151,7 @@ class Bar(tk.Tk):
         self.undo = []
         self.active = True
         self._pin_tick = 0
+        self._taskbar_owner = None
         self.hidden = False
         self.tip = None
         self._tip_job = None
@@ -2115,7 +2224,7 @@ class Bar(tk.Tk):
         The deciding signal, because these windows do not reliably take the
         foreground when clicked. Without it the poll withdraws a module out
         from under the cursor mid-click, which reads as "it ignores me".
-        The scrim is excluded on purpose: it covers the whole screen.
+        Menus are included so auto-hide cannot withdraw modules mid-command.
         """
         x, y = self.winfo_pointerx(), self.winfo_pointery()
         windows = [self] + list(self.modules)
@@ -2135,12 +2244,17 @@ class Bar(tk.Tk):
         return False
 
     def _watch_focus(self):
-        # never close a menu from here: it has a scrim and Escape for that,
-        # and doing it on a poll was destroying menus mid-click
+        # Never close a menu from here; FocusOut and Escape own its lifecycle.
         active = foreground_is_ours() or self.pointer_over_ours()
         if active != self.active:
             self.active = active
             self.place_windows()
+            # The taskbar joins the topmost band when clicked. Reinsert every
+            # visible overlay at the front immediately, without taking focus.
+            pin_topmost(self)
+            for m in self.modules:
+                if m.winfo_ismapped():
+                    pin_topmost(m)
 
         # Re-pinning re-inserts a window at the top of the topmost band, so
         # doing it while a menu is up buries the menu behind the modules and
@@ -2341,7 +2455,9 @@ class Bar(tk.Tk):
 
     def _panel_above(self):
         pos = self.db["pos"] or self._default_pos()
-        return int(pos[1]) > self.winfo_screenheight() // 2
+        area = work_area_at(pos[0], pos[1]) or (
+            0, 0, self.winfo_screenwidth(), self.winfo_screenheight())
+        return int(pos[1]) > (area[1] + area[3]) // 2
 
     def place_windows(self):
         if self.hidden:
@@ -2350,13 +2466,18 @@ class Bar(tk.Tk):
                 m.withdraw()
             return
         self.deiconify()
-        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
         if not self.db["pos"]:
             self.db["pos"] = list(self._default_pos())
         x, y = int(self.db["pos"][0]), int(self.db["pos"][1])
-        x = max(-self.bar_w + 90, min(x, sw - 90))
-        y = max(0, min(y, sh - BAR_H))
+        # The bar is intentionally allowed over the taskbar. Modules and
+        # popups still use work_area_at so they do not hide behind it.
+        area = monitor_bounds_at(x + self.bar_w // 2, y) or (
+            0, 0, self.winfo_screenwidth(), self.winfo_screenheight())
+        left, top, right, bottom = area
+        x = max(left - self.bar_w + 90, min(x, right - 90))
+        y = max(top, min(y, bottom - BAR_H))
         self.geometry("%dx%d+%d+%d" % (self.bar_w, BAR_H, x, y))
+        self.after_idle(self._sync_taskbar_owner)
 
         above = self._panel_above()
         slot = x                          # docked modules queue up beside the bar
@@ -2369,6 +2490,15 @@ class Bar(tk.Tk):
             else:
                 m.place_docked(slot, y, above)
                 slot += m.win_w + MOD_GAP
+
+    def _sync_taskbar_owner(self):
+        owner = taskbar_for_rect(self.winfo_x(), self.winfo_y(),
+                                 self.winfo_width(), self.winfo_height())
+        owner_value = int(owner or 0)
+        if owner_value != self._taskbar_owner:
+            if set_window_owner(self, owner):
+                self._taskbar_owner = owner_value
+                pin_topmost(self)
 
     # -- dragging the bar ---------------------------------------------------
 
@@ -2387,7 +2517,9 @@ class Bar(tk.Tk):
         nx, ny = self.drag["wx"] + dx, self.drag["wy"] + dy
         self.drag["at"] = (nx, ny)
         self.geometry("+%d+%d" % (nx, ny))
-        above = ny > self.winfo_screenheight() // 2
+        area = work_area_at(nx + self.bar_w // 2, ny) or (
+            0, 0, self.winfo_screenwidth(), self.winfo_screenheight())
+        above = ny > (area[1] + area[3]) // 2
         slot = nx
         for m in self.modules:            # docked modules follow the bar
             if self.module_visible(m) and not m.floating:
@@ -2399,6 +2531,7 @@ class Bar(tk.Tk):
             self.db["pos"] = list(self.drag["at"])
             self.save()
             self.render_bar()
+            self.after_idle(self._sync_taskbar_owner)
         self.drag = None
 
     # -- modules ------------------------------------------------------------
@@ -2768,9 +2901,15 @@ class Spotlight(tk.Toplevel):
         self._place(y + (SPOT_PAD if shown else 8))
 
     def _place(self, h):
-        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        self.geometry("%dx%d+%d+%d" % (SPOT_W, h, (sw - SPOT_W) // 2,
-                                       int(sh * 0.26)))
+        bx = self.bar.winfo_rootx() + self.bar.winfo_width() // 2
+        by = self.bar.winfo_rooty() + self.bar.winfo_height() // 2
+        area = work_area_at(bx, by) or (0, 0, self.winfo_screenwidth(),
+                                        self.winfo_screenheight())
+        left, top, right, bottom = area
+        x = left + (right - left - SPOT_W) // 2
+        y = top + int((bottom - top) * 0.26)
+        x, y = clamp_to_area(x, y, SPOT_W, h, area)
+        self.geometry("%dx%d+%d+%d" % (SPOT_W, h, x, y))
 
     def jump(self, tid):
         self.close()

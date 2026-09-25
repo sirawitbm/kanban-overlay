@@ -50,12 +50,17 @@ overwrite an existing board unless you pass `--force`, and keeps a `.bak`.
 
 **The bar** is the always-visible strip. On first run it finds your real
 taskbar via `SPI_GETWORKAREA` and parks itself on it, but you can drag it
-anywhere and it remembers. It carries the module buttons and two numbers —
+anywhere, including inside the taskbar area, and it remembers. It carries
+the module buttons and two numbers —
 **due today** and **overdue** — and deliberately nothing else: it shares the
 taskbar, so every extra field costs length that has to come from somewhere.
 Hover any button and it tells you what it opens. It stays near-solid
 whatever else you set, because it is the one thing always guaranteed
 clickable.
+
+When the bar overlaps a Windows taskbar, it attaches to that taskbar's native
+window automatically. This keeps it visible when Start, Search, or another
+taskbar surface opens. Moving it back onto the desktop detaches it again.
 
 There is a **tray icon** as well. Left-click brings the app back, right-click
 gives a short menu, and you can quit from there. **Hide to tray** puts the
@@ -205,9 +210,9 @@ folder rather than a shortcut, since shortcuts would mean a COM dependency.
   the screen and only frosted mode is offered.
 - Filters are plain case-insensitive substring matches on task text. There is
   no field syntax — no `due:`, no `status:`.
-- Placement uses the primary monitor's geometry, so a bar dragged to a second
-  monitor may be clamped back on the next launch. Use **Reset position** from
-  the bar menu if it becomes difficult to recover.
+- The bar and detached modules remember which monitor they were placed on.
+  Use **Reset position** from the bar menu after disconnecting a monitor if a
+  saved window becomes difficult to recover.
 - Weeks are Monday-start and clipped to the month they split out of, so a
   week straddling a month boundary can appear as two short cards.
 
