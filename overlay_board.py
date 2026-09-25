@@ -10,19 +10,27 @@ Run:    pythonw overlay_board.py   (no console window)
 
 Deps:   none - standard library tkinter only.
 
-The app is two pieces:
+The app is a bar plus a set of modules:
 
   the bar    - a slim strip, sized to sit over the Windows taskbar (it docks
                there on first run) but draggable anywhere. It is the
                dashboard: open count, overdue count, a progress meter, and
-               the next thing due. Always solid, always clickable.
-  the panel  - the post-it stack, which unfolds above or below the bar when
-               you click the chevron, and tucks away again.
+               the next thing due. Always solid, always clickable. The
+               buttons on its left summon the modules.
+  board      - the post-it stack of time buckets, plus the task input
+  today      - overdue, today and tomorrow, and nothing else
+  stats      - open/late/done at a glance, and the next seven days
 
-Only the bar is permanent. The panel, the search field and the menus are
+Each module is its own window. It starts docked - laid out in a row beside
+the bar and following it around - and the moment you drag its header it
+detaches, floats wherever you dropped it, and stays there. Double-click the
+header, or use "Dock all modules", to send it back. A dot beside a module's
+name means it is floating.
+
+Only the bar is permanent. The modules, the search field and the menus are
 transient: they appear while the app has focus and get out of the way the
 moment you click back into whatever you were doing. Clicking the bar brings
-them back. Turn that off with "Hide panel when unfocused" in the bar menu.
+them back. Turn that off with "Hide when unfocused" in the bar menu.
 
 Ghost mode is exempt from the auto-hide, since reading your tasks while you
 work in another window is the entire point of it.
@@ -210,9 +218,17 @@ FONT_SPOT_ROW = ("Segoe UI", 10)
 # UI characters so the bar still reads on a box that somehow lacks it.
 ICON_FONT = "Segoe MDL2 Assets"
 ICONS = {"search": "", "up": "", "down": "",
-         "more": "", "close": ""}
+         "more": "", "close": "", "grip": "",
+         "board": "", "today": "", "stats": ""}
 ICONS_ASCII = {"search": "⌕", "up": "▴", "down": "▾",
-               "more": "⋮", "close": "×"}
+               "more": "⋮", "close": "×", "grip": "≡",
+               "board": "≡", "today": "▤", "stats": "▐"}
+
+# every module is a separate always-on-top window the bar can summon
+MODULE_KEYS = ("board", "today", "stats")
+MOD_HDR_H = 22                      # the strip you grab to move a module
+MOD_GAP = 8                         # between modules docked in a row
+STAT_BAR_H = 26                     # the seven-day histogram
 
 DEFAULTS = {
     "tasks": [],
@@ -224,8 +240,9 @@ DEFAULTS = {
     "show_done": True,
     "active": None,
     "filters": [],
-    "panel_open": True,
-    "auto_hide": True,              # panel only while the app has focus
+    "panel_open": True,             # legacy; migrated into modules["board"]
+    "auto_hide": True,              # modules only while the app has focus
+    "modules": {},                  # per module: {"open": bool, "pos": [x, y]}
 }
 
 
@@ -239,6 +256,32 @@ def _read_state(path):
     except (ValueError, OSError):
         return None
     return saved if isinstance(saved, dict) else None
+
+
+def _valid_pos(pos):
+    return (isinstance(pos, (list, tuple)) and len(pos) == 2
+            and all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                    for v in pos))
+
+
+def _clean_modules(db):
+    """Normalise per-module state, migrating the old single-panel flag.
+
+    A module with pos None is docked and gets laid out beside the bar; any
+    other pos means the user dragged it somewhere and that is where it goes.
+    """
+    saved = db.get("modules") if isinstance(db.get("modules"), dict) else {}
+    out = {}
+    for key in MODULE_KEYS:
+        entry = saved.get(key) if isinstance(saved.get(key), dict) else {}
+        pos = entry.get("pos")
+        out[key] = {
+            "open": bool(entry.get("open", key == "board")),
+            "pos": [int(pos[0]), int(pos[1])] if _valid_pos(pos) else None,
+        }
+    if "board" not in saved and isinstance(db.get("panel_open"), bool):
+        out["board"]["open"] = db["panel_open"]
+    return out
 
 
 def load_state():
@@ -284,6 +327,8 @@ def load_state():
     db["auto_hide"] = db["auto_hide"] if isinstance(db["auto_hide"], bool) else True
     if db["active"] is not None and not isinstance(db["active"], str):
         db["active"] = None
+
+    db["modules"] = _clean_modules(db)
 
     # a hand-edited or truncated store should not crash the placement maths
     pos = db.get("pos")
@@ -741,6 +786,7 @@ def release_single_instance():
 
 
 
+
 # ---------------------------------------------------------------------------
 # shared widget helpers
 # ---------------------------------------------------------------------------
@@ -907,15 +953,718 @@ class PopMenu(tk.Toplevel):
 
 
 # ---------------------------------------------------------------------------
+# modules
+# ---------------------------------------------------------------------------
+
+class Module(tk.Toplevel):
+    """A panel the bar can summon, which the user can then move anywhere.
+
+    Every module is its own always-on-top window. It starts *docked* - laid
+    out in a row beside the bar, following it around - and the moment you
+    drag its header it becomes *floating* and stays exactly where you put it
+    until you send it back. That is the part Task Bar Hero does not do: its
+    modules are welded to the main widget.
+
+    Subclasses provide build() for persistent widgets and fill_content() to
+    draw the scrollable body, returning its height in pixels.
+    """
+
+    key = "module"
+    label = "Module"
+    icon = "board"
+    default_w = 260
+
+    def __init__(self, bar):
+        super().__init__(bar)
+        self.bar = bar
+        self.db = bar.db
+        self.parts = []
+        self.scroll_y = 0
+        self.content_h = 40
+        self.viewport_h = 40
+        self.win_w = self.default_w
+        self.win_h = 40
+        self.hdr_h = MOD_HDR_H
+        self.drag = None
+
+        self.overrideredirect(True)
+        self.attributes("-topmost", True)
+        self.configure(bg=KEY)
+
+        # -transparentcolor is Win32-only; without it ghost mode cannot work
+        self.ghost_ok = True
+        try:
+            self.attributes("-transparentcolor", KEY)
+        except tk.TclError:
+            self.ghost_ok = False
+            self.db["mode"] = "frosted"
+
+        self.font_row = tkfont.Font(font=FONT_ROW)
+        self.font_done = tkfont.Font(font=FONT_ROW)
+        self.font_done.configure(overstrike=True)
+
+        self._build_header()
+        self.canvas = tk.Canvas(self, bg=KEY, borderwidth=0,
+                                highlightthickness=0)
+        self.content = tk.Frame(self.canvas, bg=KEY)
+        self.content_window = self.canvas.create_window(
+            0, 0, window=self.content, anchor="nw")
+        # sits on the Toplevel rather than inside the canvas, so it stays put
+        # while the content slides under it
+        self.scrollbar = tk.Frame(self, bg=CARD_EDGE)
+        self.bind("<MouseWheel>", self._on_mousewheel)
+
+        self.build()
+        self.withdraw()
+
+    # -- state --------------------------------------------------------------
+
+    @property
+    def state(self):
+        return self.db["modules"][self.key]
+
+    @property
+    def is_open(self):
+        return bool(self.state["open"])
+
+    @property
+    def floating(self):
+        return self.state["pos"] is not None
+
+    @property
+    def ghost(self):
+        return self.db["mode"] == "ghost" and self.ghost_ok
+
+    def width(self):
+        return self.default_w
+
+    # -- header, which is also the drag handle ------------------------------
+
+    def _build_header(self):
+        self.header = tk.Frame(self, bg=CARD_BG, cursor="fleur")
+        self.h_grip = tk.Label(self.header, text=self.bar.icons["grip"],
+                               font=(self.bar.icon_family, 8), fg=TEXT_DONE,
+                               bg=CARD_BG, cursor="fleur")
+        self.h_title = tk.Label(self.header, text=self.label, font=FONT_DIM,
+                                fg=TEXT_DIM, bg=CARD_BG, anchor="w",
+                                cursor="fleur")
+        self.h_close = tk.Label(self.header, text=self.bar.icons["close"],
+                                font=(self.bar.icon_family, 8), fg=TEXT_DONE,
+                                bg=CARD_BG, cursor="hand2")
+        self.h_close.bind("<Button-1>", lambda e: self.bar.close_module(self.key))
+        self.h_close.bind("<Enter>",
+                          lambda e: self.h_close.configure(fg=ACCENT_OVERDUE))
+        self.h_close.bind("<Leave>",
+                          lambda e: self.h_close.configure(fg=TEXT_DONE))
+
+        for w in (self.header, self.h_grip, self.h_title):
+            w.bind("<ButtonPress-1>", self._press)
+            w.bind("<B1-Motion>", self._move)
+            w.bind("<ButtonRelease-1>", self._release)
+            w.bind("<Double-Button-1>", lambda e: self.bar.dock_module(self.key))
+            w.bind("<Button-3>", self._menu_event)
+
+    def _layout_header(self):
+        if self.ghost:
+            self.hdr_h = 0
+            self.header.place_forget()
+            return
+        self.hdr_h = MOD_HDR_H
+        self.header.place(x=0, y=0, width=self.win_w, height=self.hdr_h)
+        self.h_grip.place(x=6, y=0, width=14, height=self.hdr_h)
+        self.h_title.place(x=22, y=0, width=self.win_w - 60, height=self.hdr_h)
+        self.h_close.place(x=self.win_w - 20, y=0, width=15, height=self.hdr_h)
+        self.h_title.configure(
+            text=self.label if not self.floating else self.label + "  •")
+
+    def _press(self, e):
+        self.bar.activate()
+        self.drag = {"rx": e.x_root, "ry": e.y_root,
+                     "wx": self.winfo_x(), "wy": self.winfo_y(),
+                     "at": None}
+
+    def _move(self, e):
+        if not self.drag:
+            return
+        dx, dy = e.x_root - self.drag["rx"], e.y_root - self.drag["ry"]
+        if self.drag["at"] is None and abs(dx) + abs(dy) < 4:
+            return                        # absorb the jitter of a plain click
+        # remember where we put it rather than asking afterwards: winfo_x is
+        # only as fresh as the last processed event
+        self.drag["at"] = (self.drag["wx"] + dx, self.drag["wy"] + dy)
+        self.geometry("+%d+%d" % self.drag["at"])
+
+    def _release(self, e):
+        if self.drag and self.drag["at"]:
+            # dragging is what detaches a module; there is no other gesture
+            self.state["pos"] = list(self.drag["at"])
+            self.bar.save()
+            self._layout_header()
+            self.bar.render_bar()
+        self.drag = None
+
+    def _menu_event(self, e):
+        items = []
+        if self.floating:
+            items.append({"label": "Dock to bar",
+                          "cmd": lambda: self.bar.dock_module(self.key)})
+        else:
+            items.append({"label": "Drag the header to detach",
+                          "enabled": False, "cmd": None})
+        items += [
+            {"kind": "sep"},
+            {"label": "Close " + self.label, "danger": True,
+             "cmd": lambda: self.bar.close_module(self.key)},
+        ]
+        self.bar.popup(e.x_root, e.y_root, items)
+
+    # -- geometry -----------------------------------------------------------
+
+    def _resize_viewport(self, height):
+        self.viewport_h = max(1, int(height))
+        self.win_h = self.hdr_h + self.viewport_h
+        self._layout_header()
+        self.canvas.place(x=0, y=self.hdr_h, width=self.win_w,
+                          height=self.viewport_h)
+        self._set_scroll(self.scroll_y)
+
+    def _set_scroll(self, offset):
+        """Offset the content by moving the canvas item, not the canvas view.
+
+        yview_moveto clamps against the canvas's *realized* height, which is
+        still the old one until the geometry manager catches up - so the first
+        scroll after a re-render silently did nothing, which is precisely when
+        select() and reveal() ask to bring a card into view. Repositioning the
+        window item is exact and needs no idle pass.
+        """
+        limit = max(0, self.content_h - self.viewport_h)
+        self.scroll_y = max(0, min(int(offset), limit))
+        self.canvas.coords(self.content_window, 0, -self.scroll_y)
+        self._sync_scrollbar(limit)
+
+    def _sync_scrollbar(self, limit):
+        """Show a thumb only while there is somewhere to scroll to.
+
+        Hidden in ghost mode: a floating bar with no panel behind it would be
+        the one opaque thing left on screen.
+        """
+        if limit <= 0 or self.ghost:
+            self.scrollbar.place_forget()
+            return
+        track = max(1, self.viewport_h - 2 * PAD)
+        thumb = max(20, int(track * self.viewport_h / self.content_h))
+        y = self.hdr_h + PAD + int((track - thumb) * (self.scroll_y / limit))
+        self.scrollbar.place(x=self.win_w - 5, y=y, width=3, height=thumb)
+        self.scrollbar.lift()
+
+    def _on_mousewheel(self, event):
+        if self.content_h <= self.viewport_h:
+            return None
+        direction = -1 if event.delta > 0 else 1
+        self._set_scroll(self.scroll_y + direction * ROW_H * 3)
+        return "break"
+
+    def render(self):
+        for w in self.parts:
+            w.destroy()
+        self.parts = []
+        self.win_w = self.width()
+        self.content_h = max(20, self.fill_content(KEY if self.ghost else CARD_BG,
+                                                   self.ghost))
+        self.content.configure(width=self.win_w, height=self.content_h)
+        self.canvas.itemconfigure(self.content_window, width=self.win_w,
+                                  height=self.content_h)
+        self.canvas.configure(scrollregion=(0, 0, self.win_w, self.content_h))
+        self.attributes("-alpha", 1.0 if self.ghost else self.db["alpha"])
+
+    def place_docked(self, x, bar_y, above):
+        sh = self.winfo_screenheight()
+        room = (bar_y - BAR_GAP) if above else (sh - bar_y - BAR_H - BAR_GAP)
+        self._fit(room)
+        y = (bar_y - BAR_GAP - self.win_h) if above else (bar_y + BAR_H + BAR_GAP)
+        self._show_at(x, y)
+
+    def place_floating(self):
+        x, y = self.state["pos"]
+        self._fit(self.winfo_screenheight() - 2 * BAR_GAP)
+        self._show_at(x, y)
+
+    def _fit(self, room):
+        self._resize_viewport(min(self.content_h, max(60, room - self.hdr_h)))
+
+    def _show_at(self, x, y):
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        x = max(0, min(int(x), sw - self.win_w))
+        y = max(0, min(int(y), sh - self.win_h))
+        # geometry before deiconify: a window being mapped this same pass can
+        # swallow a position set afterwards and come up at 0,0 instead
+        self.geometry("%dx%d+%d+%d" % (self.win_w, self.win_h, x, y))
+        self.deiconify()
+        pin_topmost(self)
+
+    # -- drawing helpers shared by every module -----------------------------
+
+    def label_at(self, parent, text, x, y, w, h, font, fg, bg, ghost,
+                 anchor="w"):
+        """Place a string, haloed in ghost mode.
+
+        Ghost mode has no panel behind the text, so light text landing on
+        light pixels of the app underneath becomes unreadable. Four offset
+        copies in black give every glyph a 1px dark outline, which separates
+        it from whatever it happens to be sitting on.
+        """
+        if ghost:
+            for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                tk.Label(parent, text=text, font=font, fg=GHOST_HALO, bg=bg,
+                         anchor=anchor).place(x=x + dx, y=y + dy,
+                                              width=w, height=h)
+        lbl = tk.Label(parent, text=text, font=font, fg=fg, bg=bg, anchor=anchor)
+        lbl.place(x=x, y=y, width=w, height=h)
+        return lbl
+
+    def task_row(self, parent, t, due, y, inner, bg, ghost, accent,
+                 show_date=True):
+        """One task line: click the glyph to cycle, right-click for the menu."""
+        status = t["status"]
+        done = status == "done"
+        glyph_fg = {"todo": TEXT_DIM, "doing": accent, "done": TEXT_DONE}[status]
+
+        g = self.label_at(parent, GLYPH[status], 11, y, 18, ROW_H,
+                          FONT_ROW, glyph_fg, bg, ghost, anchor="center")
+        g.configure(cursor="hand2")
+
+        date_w = 46 if (show_date and due) else 0
+        lbl = self.label_at(parent, t["text"], 32, y, inner - 44 - date_w, ROW_H,
+                            self.font_done if done else self.font_row,
+                            TEXT_DONE if done else TEXT, bg, ghost)
+
+        board = self.bar.board
+        g.bind("<Button-1>", lambda e, i=t["id"]: board.cycle(i))
+        lbl.bind("<Double-Button-1>", lambda e, i=t["id"]: board.edit(i))
+        for w in (g, lbl):
+            w.bind("<Button-3>",
+                   lambda e, i=t["id"]: self.bar.open_task_menu(e.x_root,
+                                                                e.y_root, i))
+        if date_w:
+            self.label_at(parent, fmt_short(due), inner - 12 - date_w, y, date_w,
+                          ROW_H, FONT_DIM, TEXT_DONE if done else TEXT_DIM,
+                          bg, ghost, anchor="e")
+
+    # -- subclass hooks -----------------------------------------------------
+
+    def build(self):
+        """Create widgets that outlive a render (entries and the like)."""
+
+    def fill_content(self, bg, ghost):
+        raise NotImplementedError
+
+
+class BoardModule(Module):
+    """The post-it stack: time buckets that split themselves, plus the input."""
+
+    key = "board"
+    label = "Board"
+    icon = "board"
+
+    def width(self):
+        return int(self.db["width"])
+
+    def build(self):
+        self.buckets = []
+        self.bucket_ranges = {}
+        self.editing = None
+        self.entry_y = None
+
+        self.entry = tk.Entry(self.content, font=FONT_ROW, fg=TEXT, bg=ENTRY_BG,
+                              insertbackground=TEXT, relief="flat",
+                              highlightthickness=1,
+                              highlightbackground=CARD_EDGE,
+                              highlightcolor=ACCENTS[2])
+        self.entry.bind("<Return>", self.commit_entry)
+        self.entry.bind("<Escape>", self.cancel_entry)
+
+        # a real Label rather than placeholder text in the Entry, so an empty
+        # field is never mistaken for a typed one by commit_entry
+        self.hint = tk.Label(self.content,
+                             text="  add a task…   @fri  @+2w  @10/3",
+                             font=FONT_DIM, fg=TEXT_DONE, bg=ENTRY_BG,
+                             anchor="w", cursor="xterm")
+        self.hint.bind("<Button-1>", lambda e: self.focus_entry())
+        for ev in ("<KeyRelease>", "<FocusIn>", "<FocusOut>"):
+            self.entry.bind(ev, self.sync_hint, add="+")
+
+    def find(self, tid):
+        return next((t for t in self.db["tasks"] if t["id"] == tid), None)
+
+    def refresh(self):
+        self.bar.refresh()
+
+    def sync_hint(self, e=None):
+        """Show the hint only while the field is on screen and empty."""
+        if self.entry_y is not None and not self.entry.get():
+            self.hint.place(x=PAD + 2, y=self.entry_y + 1,
+                            width=self.win_w - 2 * PAD - 4, height=ENTRY_H - 2)
+            self.hint.lift()
+        else:
+            self.hint.place_forget()
+
+    # -- render -------------------------------------------------------------
+
+    def fill_content(self, bg, ghost):
+        inner = self.win_w - 2 * PAD
+        tasks = apply_filters(self.db["tasks"], self.db["filters"])
+        self.buckets = build_buckets(tasks, self.bar.today, self.db["show_done"])
+        self.bucket_ranges = {}
+        keys = [b.key for b in self.buckets]
+        if self.db["active"] is not None and self.db["active"] not in keys:
+            self.db["active"] = keys[0] if keys else None
+
+        y = bottom = TOP_H
+        for b in self.buckets:
+            expanded = b.key == self.db["active"]
+            rows = b.rows(self.db["show_done"]) if expanded else []
+            body = BODY_TOP + max(1, len(rows)) * ROW_H + BODY_BOT if expanded else 0
+            h = HDR_H + body
+
+            card = tk.Frame(self.content, bg=bg)
+            card.place(x=PAD, y=y, width=inner, height=h)
+            self.parts.append(card)
+            self.bucket_ranges[b.key] = (y, y + h)
+            self._header(card, b, inner, h, expanded, bg, ghost)
+            if expanded:
+                self._body(card, b, rows, inner, bg, ghost)
+
+            bottom = y + h
+            # collapsed cards tuck under the next one; expanded ones stand clear
+            y += (h + GAP) if expanded else (HDR_H - OVERLAP)
+
+        if not self.buckets:
+            msg = "no task matches the filter" if self.db["filters"] else \
+                  "nothing planned yet"
+            self.parts.append(self.label_at(self.content, msg, PAD + 2, y,
+                                            inner, 20, FONT_DIM, TEXT_DIM,
+                                            bg, ghost))
+            bottom = y + 20
+
+        if ghost:
+            self.entry.place_forget()
+            self.entry_y = None
+            total = bottom + PAD
+        else:
+            self.entry_y = bottom + GAP
+            self.entry.place(x=PAD, y=self.entry_y, width=inner, height=ENTRY_H)
+            total = bottom + GAP + ENTRY_H + PAD
+        self.sync_hint()
+        return total
+
+    def _header(self, card, b, inner, h, expanded, bg, ghost):
+        hdr = tk.Frame(card, bg=bg, cursor="hand2")
+        hdr.place(x=0, y=0, width=inner, height=HDR_H)
+        title = self.label_at(hdr, "%s  %s" % (CARET[expanded], b.title),
+                              12, 0, inner - 84, HDR_H,
+                              FONT_HDR, b.accent, bg, ghost)
+        badge = self.label_at(hdr, b.badge(), inner - 70, 0, 58, HDR_H,
+                              FONT_DIM, b.accent if ghost else TEXT_DIM, bg,
+                              ghost, anchor="e")
+
+        if not ghost:
+            # drawn after the header so they sit on top of it: the edge is what
+            # makes the stack read as separate sheets rather than one dark slab
+            tk.Frame(card, bg=CARD_EDGE).place(x=0, y=0, width=inner, height=1)
+            tk.Frame(card, bg=b.accent).place(x=0, y=0, width=3, height=h)
+
+        for w in (hdr, title, badge):
+            w.bind("<Button-1>", lambda e, k=b.key: self.select(k))
+            w.bind("<Button-3>", self.bar.menu_event)
+
+        if expanded and not ghost:
+            tk.Frame(card, bg=CARD_EDGE).place(x=12, y=HDR_H - 1,
+                                               width=inner - 24, height=1)
+
+    def _body(self, card, b, rows, inner, bg, ghost):
+        if not rows:
+            self.label_at(card, "empty", 32, HDR_H + BODY_TOP, inner - 44,
+                          ROW_H, FONT_DIM, TEXT_DIM, bg, ghost)
+            return
+        y = HDR_H + BODY_TOP
+        for d, t in rows:
+            self.task_row(card, t, d, y, inner, bg, ghost, b.accent,
+                          show_date=b.show_dates)
+            y += ROW_H
+
+    def scroll_to_bucket(self, key):
+        span = self.bucket_ranges.get(key)
+        if not span:
+            return
+        top, bottom = span
+        if top < self.scroll_y:
+            self._set_scroll(top)
+        elif bottom > self.scroll_y + self.viewport_h:
+            self._set_scroll(bottom - self.viewport_h)
+
+    # -- actions ------------------------------------------------------------
+
+    def select(self, key):
+        # clicking the open card again closes it, so the stack can sit flat
+        self.db["active"] = None if self.db["active"] == key else key
+        self.bar.save()
+        self.refresh()
+        if self.db["active"] == key:
+            self.scroll_to_bucket(key)
+
+    def cycle(self, tid):
+        t = self.find(tid)
+        if t:
+            t["status"] = NEXT_STATUS[t["status"]]
+            self.bar.save()
+            self.refresh()
+
+    def set_status(self, tid, status):
+        t = self.find(tid)
+        if t:
+            t["status"] = status
+            self.bar.save()
+            self.refresh()
+
+    def set_due(self, tid, shorthand):
+        t = self.find(tid)
+        if not t:
+            return
+        d = parse_due(shorthand, self.bar.today) if shorthand else None
+        t["due"] = d.isoformat() if d else None
+        self.bar.save()
+        self.refresh()
+        self.reveal(tid)
+
+    def delete(self, tid):
+        gone = [t for t in self.db["tasks"] if t["id"] == tid]
+        self.bar.push_undo(gone)
+        self.db["tasks"] = [t for t in self.db["tasks"] if t["id"] != tid]
+        if self.editing == tid:
+            self.cancel_entry()
+        self.bar.save()
+        self.refresh()
+
+    def edit(self, tid):
+        t = self.find(tid)
+        if not t:
+            return
+        self.editing = tid
+        raw = t["text"] + (" @" + t["due"] if t["due"] else "")
+        self.entry.configure(highlightbackground=ACCENTS[3],
+                             highlightcolor=ACCENTS[3])
+        self.entry.delete(0, "end")
+        self.entry.insert(0, raw)
+        self.sync_hint()
+        self.focus_entry()
+        self.entry.select_range(0, "end")
+        self.entry.icursor("end")
+
+    def focus_entry(self):
+        if self.ghost:
+            self.bar.toggle_mode()
+        self._set_scroll(self.content_h - self.viewport_h)
+        self.focus_force()               # overrideredirect windows need a shove
+        self.entry.focus_set()
+
+    def cancel_entry(self, e=None):
+        self.editing = None
+        self.entry.delete(0, "end")
+        self.entry.configure(highlightbackground=CARD_EDGE,
+                             highlightcolor=ACCENTS[2])
+        self.sync_hint()
+
+    def commit_entry(self, e=None):
+        raw = self.entry.get().strip()
+        if not raw:
+            return self.cancel_entry()
+        text, due = split_due(raw, self.bar.today)
+        if not text:
+            return self.cancel_entry()
+        iso = due.isoformat() if due else None
+
+        if self.editing is not None:
+            t = self.find(self.editing)
+            if t:
+                t["text"], t["due"] = text, iso
+            target = self.editing
+        else:
+            target = self.db["next_id"]
+            self.db["next_id"] += 1
+            self.db["tasks"].append(
+                {"id": target, "text": text, "due": iso, "status": "todo"})
+
+        self.cancel_entry()
+        self.bar.save()
+        self.refresh()
+        self.reveal(target)
+        self.entry.focus_set()
+
+    def reveal(self, tid):
+        """Open whichever card the task just landed in.
+
+        A task can be invisible here: if an active filter excludes it, it is
+        in no bucket at all, and the stack is left as it was.
+        """
+        for b in self.buckets:
+            if any(t["id"] == tid for _, t in b.pairs):
+                if b.key != self.db["active"]:
+                    self.db["active"] = b.key
+                    self.bar.save()
+                    self.refresh()
+                self.scroll_to_bucket(b.key)
+                return
+
+
+class TodayModule(Module):
+    """The short answer to "what now" - overdue, today, tomorrow. Nothing else."""
+
+    key = "today"
+    label = "Today"
+    icon = "today"
+    default_w = 250
+
+    def fill_content(self, bg, ghost):
+        inner = self.win_w - 2 * PAD
+        today = self.bar.today
+        tasks = [t for t in apply_filters(self.db["tasks"], self.db["filters"])
+                 if t["status"] != "done"]
+
+        groups = [
+            ("Overdue", ACCENT_OVERDUE,
+             sorted(((to_date(t.get("due")), t) for t in tasks
+                     if to_date(t.get("due")) and to_date(t.get("due")) < today),
+                    key=lambda p: p[0])),
+            ("Today", ACCENTS[0],
+             [(today, t) for t in tasks if to_date(t.get("due")) == today]),
+            ("Tomorrow", ACCENTS[2],
+             [(today + timedelta(days=1), t) for t in tasks
+              if to_date(t.get("due")) == today + timedelta(days=1)]),
+        ]
+        groups = [g for g in groups if g[2]]
+
+        y = TOP_H
+        if not groups:
+            self.parts.append(self.label_at(
+                self.content, "nothing due – enjoy it", PAD + 2, y, inner,
+                ROW_H, FONT_DIM, TEXT_DIM, bg, ghost))
+            return y + ROW_H + PAD
+
+        for name, accent, rows in groups:
+            block = tk.Frame(self.content, bg=bg)
+            h = HDR_H + BODY_TOP + len(rows) * ROW_H + BODY_BOT
+            block.place(x=PAD, y=y, width=inner, height=h)
+            self.parts.append(block)
+
+            if not ghost:
+                tk.Frame(block, bg=CARD_EDGE).place(x=0, y=0, width=inner,
+                                                    height=1)
+                tk.Frame(block, bg=accent).place(x=0, y=0, width=3, height=h)
+            self.label_at(block, name, 12, 0, inner - 60, HDR_H,
+                          FONT_HDR, accent, bg, ghost)
+            self.label_at(block, str(len(rows)), inner - 50, 0, 38, HDR_H,
+                          FONT_DIM, accent if ghost else TEXT_DIM, bg, ghost,
+                          anchor="e")
+
+            ry = HDR_H + BODY_TOP
+            for due, t in rows:
+                self.task_row(block, t, due, ry, inner, bg, ghost, accent,
+                              show_date=(name == "Overdue"))
+                ry += ROW_H
+            y += h + GAP
+        return y - GAP + PAD
+
+
+class StatsModule(Module):
+    """A glance at the shape of the week: counts, progress, what is coming."""
+
+    key = "stats"
+    label = "Stats"
+    icon = "stats"
+    default_w = 232
+
+    def fill_content(self, bg, ghost):
+        inner = self.win_w - 2 * PAD
+        today = self.bar.today
+        tasks = apply_filters(self.db["tasks"], self.db["filters"])
+        s = summarise(tasks, today)
+
+        panel = tk.Frame(self.content, bg=bg)
+        self.parts.append(panel)
+
+        y = 8
+        self.label_at(panel, str(s["open"]), 12, y, 70, 34,
+                      ("Segoe UI Light", 24),
+                      ACCENTS[1] if not s["open"] else TEXT, bg, ghost)
+        self.label_at(panel, "open", 12, y + 34, 70, 14, FONT_DIM, TEXT_DIM,
+                      bg, ghost)
+        self.label_at(panel, str(s["late"]), 86, y, 60, 34,
+                      ("Segoe UI Light", 24),
+                      ACCENT_OVERDUE if s["late"] else TEXT_DONE, bg, ghost)
+        self.label_at(panel, "late", 86, y + 34, 60, 14, FONT_DIM, TEXT_DIM,
+                      bg, ghost)
+        self.label_at(panel, "%d%%" % round(s["frac"] * 100), inner - 76, y,
+                      64, 34, ("Segoe UI Light", 24), ACCENTS[2], bg, ghost,
+                      anchor="e")
+        self.label_at(panel, "done", inner - 76, y + 34, 64, 14, FONT_DIM,
+                      TEXT_DIM, bg, ghost, anchor="e")
+        y += 56
+
+        track = tk.Frame(panel, bg=METER_BG)
+        track.place(x=12, y=y, width=inner - 24, height=METER_H)
+        fill = int(round((inner - 24) * max(0.0, min(1.0, s["frac"]))))
+        if fill:
+            tk.Frame(track, bg=ACCENTS[1] if s["frac"] >= 1.0 else ACCENTS[2]
+                     ).place(x=0, y=0, width=fill, height=METER_H)
+        y += METER_H + 14
+
+        self.label_at(panel, "next 7 days", 12, y, inner - 24, 14, FONT_DIM,
+                      TEXT_DIM, bg, ghost)
+        y += 18
+
+        counts = []
+        for i in range(7):
+            day = today + timedelta(days=i)
+            counts.append(sum(1 for t in tasks if t["status"] != "done"
+                              and to_date(t.get("due")) == day))
+        peak = max(counts + [1])
+        slot = (inner - 24) // 7
+        for i, n in enumerate(counts):
+            day = today + timedelta(days=i)
+            bx = 12 + i * slot
+            bh = max(2, int(STAT_BAR_H * n / peak)) if n else 2
+            colour = ACCENTS[0] if i == 0 else ACCENTS[2]
+            tk.Frame(panel, bg=colour if n else METER_BG).place(
+                x=bx + 2, y=y + (STAT_BAR_H - bh), width=slot - 5, height=bh)
+            self.label_at(panel, day.strftime("%a")[0], bx, y + STAT_BAR_H + 2,
+                          slot - 1, 14, FONT_DIM,
+                          TEXT if i == 0 else TEXT_DIM, bg, ghost,
+                          anchor="center")
+            if n:
+                self.label_at(panel, str(n), bx, y + STAT_BAR_H + 15, slot - 1,
+                              12, FONT_DIM, TEXT_DIM, bg, ghost,
+                              anchor="center")
+        y += STAT_BAR_H + 32
+
+        if not ghost:
+            tk.Frame(panel, bg=CARD_EDGE).place(x=0, y=0, width=inner, height=1)
+        panel.place(x=PAD, y=TOP_H, width=inner, height=y)
+        return TOP_H + y + PAD
+
+
+# ---------------------------------------------------------------------------
 # the bar
 # ---------------------------------------------------------------------------
 
-class Bar(tk.Tk):
-    """The always-visible strip: dashboard, search, and filter blocks.
+MODULE_CLASSES = (BoardModule, TodayModule, StatsModule)
 
-    It owns the panel, the search overlay and any open menu, and it is the
-    only window that never goes transparent - whatever else is hidden, there
-    is always this to click on.
+
+class Bar(tk.Tk):
+    """The always-visible strip: dashboard, module buttons, search, filters.
+
+    It owns every module, the search overlay and any open menu, and it is the
+    only window that never goes transparent and never hides - whatever else
+    is tucked away, there is always this to click on.
     """
 
     def __init__(self, db):
@@ -934,7 +1683,7 @@ class Bar(tk.Tk):
         self.attributes("-topmost", True)
         self.configure(bg=BAR_BG)
         # the bar is chrome, not content: it stays near-solid whatever the
-        # panel's opacity is set to, so it never dissolves into the taskbar
+        # modules' opacity is set to, so it never dissolves into the taskbar
         self.attributes("-alpha", BAR_ALPHA)
 
         fams = set(tkfont.families())
@@ -949,7 +1698,10 @@ class Bar(tk.Tk):
         self._draggable(self)
         self.bind("<Button-3>", self.menu_event)
 
-        self.panel = Panel(self)
+        self.modules = [cls(self) for cls in MODULE_CLASSES]
+        self.by_key = {m.key: m for m in self.modules}
+        self.board = self.by_key["board"]
+
         self.bind_all("<F2>", lambda e: self.toggle_mode())
         self.bind_all("<Control-f>", lambda e: self.open_search())
         self.bind_all("<Control-n>", lambda e: self.add_task())
@@ -962,14 +1714,14 @@ class Bar(tk.Tk):
 
     # -- focus and pinning --------------------------------------------------
 
-    def panel_should_show(self):
-        """The panel is transient; the bar is the only permanent window.
+    def module_visible(self, m):
+        """Modules are transient; the bar is the only permanent window.
 
         Ghost mode is exempt on purpose. Its whole point is reading your
         tasks while you work in something else, so auto-hiding it there
         would leave the mode with nothing to do.
         """
-        if not self.db["panel_open"]:
+        if not m.is_open:
             return False
         if self.db["auto_hide"] and not self.active and self.db["mode"] != "ghost":
             return False
@@ -987,12 +1739,13 @@ class Bar(tk.Tk):
                     self.spot.close()
             self.place_windows()
         pin_topmost(self)
-        if self.panel.winfo_ismapped():
-            pin_topmost(self.panel)
+        for m in self.modules:
+            if m.winfo_ismapped():
+                pin_topmost(m)
         self.after(FOCUS_POLL_MS, self._watch_focus)
 
     def activate(self, *_):
-        """Claim focus so the panel comes back when the bar is clicked."""
+        """Claim focus so the modules come back when the bar is clicked."""
         self.active = True
         try:
             self.focus_force()
@@ -1010,7 +1763,9 @@ class Bar(tk.Tk):
 
     def refresh(self):
         self.render_bar()
-        self.panel.render()
+        for m in self.modules:
+            if self.module_visible(m):
+                m.render()
         self.place_windows()
 
     def _tick(self):
@@ -1077,6 +1832,19 @@ class Bar(tk.Tk):
         kill.bind("<Leave>", lambda e: kill.configure(fg=CHIP_FG))
         self.widgets.append(box)
 
+    def _module_button(self, m, x):
+        """Lit when the module is on screen, with a dot when it floats free."""
+        on = m.is_open
+        fg = ACCENTS[2] if on else TEXT_DIM
+        self._icon(m.icon, x, lambda w, k=m.key: self.toggle_module(k), fg=fg)
+        if on:
+            dot_w = 10 if m.floating else ICON_W - 10
+            marker = tk.Frame(self, bg=ACCENTS[2] if not m.floating
+                              else ACCENTS[3])
+            marker.place(x=x + (ICON_W - dot_w) // 2, y=BAR_H - 3,
+                         width=dot_w, height=2)
+            self.widgets.append(marker)
+
     # -- render -------------------------------------------------------------
 
     def render_bar(self):
@@ -1109,21 +1877,19 @@ class Bar(tk.Tk):
         late_w = (self.m_barb.measure(late_txt) + 12) if late_txt else 0
         next_w = self.m_bar.measure(next_txt) + 8
         chip_ws = [self.m_chip.measure(f) + 32 for f in filters]
+        buttons_w = ICON_W * len(self.modules)
 
-        left_w = (BAR_PAD + ICON_W + 4 + open_w + late_w + SEP_W + METER_W
-                  + SEP_W + next_w)
+        left_w = (BAR_PAD + buttons_w + SEP_W + open_w + late_w + SEP_W
+                  + METER_W + SEP_W + next_w)
         right_w = (ICON_W + sum(w + 5 for w in chip_ws) + ICON_W + BAR_PAD)
         self.bar_w = max(BAR_MIN_W, left_w + 22 + right_w)
 
-        above = self._panel_above()
-        if self.db["panel_open"]:
-            caret = "down" if above else "up"      # points the way it folds
-        else:
-            caret = "up" if above else "down"
         x = BAR_PAD
-        self._icon(caret, x, self.toggle_panel,
-                   fg=TEXT if self.db["panel_open"] else TEXT_DIM)
-        x += ICON_W + 4
+        for m in self.modules:
+            self._module_button(m, x)
+            x += ICON_W
+        self._sep(x)
+        x += SEP_W
 
         self._text(open_txt, x, open_w, FONT_BAR_B,
                    TEXT if s["open"] else ACCENTS[1])
@@ -1173,51 +1939,88 @@ class Bar(tk.Tk):
         x = max(-self.bar_w + 90, min(x, sw - 90))
         y = max(0, min(y, sh - BAR_H))
         self.geometry("%dx%d+%d+%d" % (self.bar_w, BAR_H, x, y))
-        self.panel.place_near(x, y, self._panel_above())
 
-    # -- dragging -----------------------------------------------------------
+        above = self._panel_above()
+        slot = x                          # docked modules queue up beside the bar
+        for m in self.modules:
+            if not self.module_visible(m):
+                m.withdraw()
+                continue
+            if m.floating:
+                m.place_floating()
+            else:
+                m.place_docked(slot, y, above)
+                slot += m.win_w + MOD_GAP
+
+    # -- dragging the bar ---------------------------------------------------
 
     def _press(self, e):
-        self.activate()                   # clicking the bar brings the panel back
-        self.drag = [e.x_root, e.y_root, self.winfo_x(), self.winfo_y(), False]
+        self.activate()                   # clicking the bar brings modules back
+        self.drag = {"rx": e.x_root, "ry": e.y_root,
+                     "wx": self.winfo_x(), "wy": self.winfo_y(),
+                     "at": None}
 
     def _move(self, e):
         if not self.drag:
             return
-        x0, y0, wx, wy, moved = self.drag
-        dx, dy = e.x_root - x0, e.y_root - y0
-        if not moved and abs(dx) + abs(dy) < 4:
+        dx, dy = e.x_root - self.drag["rx"], e.y_root - self.drag["ry"]
+        if self.drag["at"] is None and abs(dx) + abs(dy) < 4:
             return                        # absorb the jitter of a plain click
-        self.drag[4] = True
-        nx, ny = wx + dx, wy + dy
+        nx, ny = self.drag["wx"] + dx, self.drag["wy"] + dy
+        self.drag["at"] = (nx, ny)
         self.geometry("+%d+%d" % (nx, ny))
-        self.panel.place_near(nx, ny, ny > self.winfo_screenheight() // 2)
+        above = ny > self.winfo_screenheight() // 2
+        slot = nx
+        for m in self.modules:            # docked modules follow the bar
+            if self.module_visible(m) and not m.floating:
+                m.place_docked(slot, ny, above)
+                slot += m.win_w + MOD_GAP
 
     def _release(self, e):
-        if self.drag and self.drag[4]:
-            self.db["pos"] = [self.winfo_x(), self.winfo_y()]
+        if self.drag and self.drag["at"]:
+            self.db["pos"] = list(self.drag["at"])
             self.save()
-            self.render_bar()             # the fold arrow may have flipped
+            self.render_bar()
         self.drag = None
 
-    # -- actions ------------------------------------------------------------
+    # -- modules ------------------------------------------------------------
 
-    def toggle_panel(self, *_):
-        self.db["panel_open"] = not self.db["panel_open"]
+    def toggle_module(self, key):
+        m = self.by_key[key]
+        m.state["open"] = not m.state["open"]
         self.save()
         self.refresh()
 
+    def close_module(self, key):
+        self.by_key[key].state["open"] = False
+        self.save()
+        self.refresh()
+
+    def dock_module(self, key):
+        self.by_key[key].state["pos"] = None
+        self.save()
+        self.refresh()
+
+    def dock_all(self, *_):
+        for m in self.modules:
+            m.state["pos"] = None
+        self.save()
+        self.refresh()
+
+    # -- actions ------------------------------------------------------------
+
     def toggle_mode(self, *_):
-        if not self.panel.ghost_ok:
+        if not self.board.ghost_ok:
             return
         self.db["mode"] = "frosted" if self.db["mode"] == "ghost" else "ghost"
         self.save()
         self.refresh()
 
     def add_task(self, *_):
-        self.db["panel_open"] = True
+        self.board.state["open"] = True
+        self.activate()
         self.refresh()
-        self.panel.focus_entry()
+        self.board.focus_entry()
 
     def open_search(self, *_):
         if self.spot is not None and self.spot.winfo_exists():
@@ -1227,14 +2030,14 @@ class Bar(tk.Tk):
 
     def jump_to(self, tid):
         """Open the card a task lives in - the search result's payoff."""
-        self.db["panel_open"] = True
+        self.board.state["open"] = True
+        self.activate()
         self.refresh()
-        self.panel.reveal(tid)
+        self.board.reveal(tid)
 
     def add_filter(self, q):
         if q and q not in self.db["filters"]:
             self.db["filters"].append(q)
-            self.db["panel_open"] = True
             self.save()
         self.refresh()
 
@@ -1268,9 +2071,6 @@ class Bar(tk.Tk):
         self.save()
         self.refresh()
 
-    def toggle_startup(self, *_):
-        set_startup(not startup_enabled())
-
     def collapse_all(self, *_):
         self.db["active"] = None
         self.save()
@@ -1278,6 +2078,8 @@ class Bar(tk.Tk):
 
     def reset_position(self, *_):
         self.db["pos"] = None
+        for m in self.modules:
+            m.state["pos"] = None
         self.save()
         self.refresh()
 
@@ -1332,25 +2134,29 @@ class Bar(tk.Tk):
             {"label": "Add task", "accel": "Ctrl+N", "cmd": self.add_task},
             {"label": "Search", "accel": "Ctrl+F", "cmd": self.open_search},
             {"label": "Collapse all", "cmd": self.collapse_all},
-            {"label": "Reset position", "cmd": self.reset_position},
             {"kind": "sep"},
         ]
-        if self.panel.ghost_ok:
+        for m in self.modules:
+            items.append({"label": m.label, "checked": m.is_open,
+                          "cmd": (lambda k=m.key: self.toggle_module(k))})
+        if any(m.floating for m in self.modules):
+            items.append({"label": "Dock all modules", "cmd": self.dock_all})
+        items.append({"kind": "sep"})
+
+        if self.board.ghost_ok:
             items.append({"label": "Ghost mode", "accel": "F2",
                           "checked": self.db["mode"] == "ghost",
                           "cmd": self.toggle_mode})
         items += [
             {"label": "Show completed", "checked": bool(self.db["show_done"]),
              "cmd": self.toggle_done},
-            {"label": "Hide panel when unfocused",
-             "checked": bool(self.db["auto_hide"]), "cmd": self.toggle_auto_hide},
-            {"label": "Run at login", "checked": startup_enabled(),
-             "cmd": self.toggle_startup},
+            {"label": "Hide when unfocused", "checked": bool(self.db["auto_hide"]),
+             "cmd": self.toggle_auto_hide},
             {"kind": "sep"},
             {"kind": "choice", "label": "Opacity",
              "options": [("%d" % round(a * 100), a) for a in ALPHAS],
              "value": self.db["alpha"], "cmd": self.set_alpha},
-            {"kind": "choice", "label": "Width",
+            {"kind": "choice", "label": "Board",
              "options": [(str(w), w) for w in WIDTHS],
              "value": self.db["width"], "cmd": self.set_width},
             {"kind": "sep"},
@@ -1359,6 +2165,7 @@ class Bar(tk.Tk):
             items.append({"label": "Clear all filters",
                           "cmd": self.clear_filters})
         items += [
+            {"label": "Reset positions", "cmd": self.reset_position},
             {"label": "Undo delete", "accel": "Ctrl+Z",
              "enabled": bool(self.undo), "cmd": self.undo_last},
             {"label": "Clear completed", "cmd": self.clear_completed},
@@ -1368,434 +2175,29 @@ class Bar(tk.Tk):
         return items
 
     def open_task_menu(self, x, y, tid):
-        p = self.panel
-        t = p.find(tid)
+        board = self.board
+        t = board.find(tid)
         if not t:
             return
         items = [{"label": "%s   %s" % (GLYPH[s], s),
                   "checked": t["status"] == s,
-                  "cmd": (lambda s=s: p.set_status(tid, s))}
+                  "cmd": (lambda s=s: board.set_status(tid, s))}
                  for s in ("todo", "doing", "done")]
         items += [
             {"kind": "sep"},
-            {"label": "Edit text and date", "cmd": lambda: p.edit(tid)},
+            {"label": "Edit text and date", "cmd": lambda: board.edit(tid)},
             {"kind": "choice", "label": "Due",
              "options": [("today", "today"), ("tmr", "tomorrow"),
                          ("+1w", "+1w"), ("none", None)],
              "value": _UNSET,             # nothing preselected on this row
-             "cmd": lambda v: p.set_due(tid, v)},
+             "cmd": lambda v: board.set_due(tid, v)},
             {"kind": "sep"},
-            {"label": "Delete", "danger": True, "cmd": lambda: p.delete(tid)},
+            {"label": "Delete", "danger": True, "cmd": lambda: board.delete(tid)},
         ]
         self.popup(x, y, items)
 
 
 _UNSET = object()
-
-
-# ---------------------------------------------------------------------------
-# the panel
-# ---------------------------------------------------------------------------
-
-class Panel(tk.Toplevel):
-    """The post-it stack. Unfolds from the bar; goes transparent in ghost."""
-
-    def __init__(self, bar):
-        super().__init__(bar)
-        self.bar = bar
-        self.db = bar.db
-        self.cards = []
-        self.buckets = []
-        self.editing = None
-        self.entry_y = None
-        self.scroll_y = 0
-        self.content_h = 60
-        self.bucket_ranges = {}
-        self.win_w, self.win_h = int(self.db["width"]), 60
-
-        self.overrideredirect(True)
-        self.attributes("-topmost", True)
-        self.configure(bg=KEY)
-
-        # -transparentcolor is Win32-only; without it ghost mode cannot work
-        self.ghost_ok = True
-        try:
-            self.attributes("-transparentcolor", KEY)
-        except tk.TclError:
-            self.ghost_ok = False
-            self.db["mode"] = "frosted"
-
-        self.canvas = tk.Canvas(self, bg=KEY, borderwidth=0,
-                                highlightthickness=0)
-        self.content = tk.Frame(self.canvas, bg=KEY)
-        self.content_window = self.canvas.create_window(
-            0, 0, window=self.content, anchor="nw")
-        self.bind("<MouseWheel>", self._on_mousewheel)
-
-        # sits on the Toplevel rather than inside the canvas, so it stays put
-        # while the content slides under it
-        self.scrollbar = tk.Frame(self, bg=CARD_EDGE)
-
-        self.font_row = tkfont.Font(font=FONT_ROW)
-        self.font_done = tkfont.Font(font=FONT_ROW)
-        self.font_done.configure(overstrike=True)
-
-        self.entry = tk.Entry(self.content, font=FONT_ROW, fg=TEXT, bg=ENTRY_BG,
-                              insertbackground=TEXT, relief="flat",
-                              highlightthickness=1,
-                              highlightbackground=CARD_EDGE,
-                              highlightcolor=ACCENTS[2])
-        self.entry.bind("<Return>", self.commit_entry)
-        self.entry.bind("<Escape>", self.cancel_entry)
-
-        # a real Label rather than placeholder text in the Entry, so an empty
-        # field is never mistaken for a typed one by commit_entry
-        self.hint = tk.Label(self.content, text="  add a task…   @fri  @+2w  @10/3",
-                             font=FONT_DIM, fg=TEXT_DONE, bg=ENTRY_BG,
-                             anchor="w", cursor="xterm")
-        self.hint.bind("<Button-1>", lambda e: self.focus_entry())
-        for ev in ("<KeyRelease>", "<FocusIn>", "<FocusOut>"):
-            self.entry.bind(ev, self.sync_hint, add="+")
-        self.withdraw()
-
-    @property
-    def mode(self):
-        return self.db["mode"] if self.ghost_ok else "frosted"
-
-    def find(self, tid):
-        return next((t for t in self.db["tasks"] if t["id"] == tid), None)
-
-    def refresh(self):
-        self.bar.refresh()
-
-    def sync_hint(self, e=None):
-        """Show the hint only while the field is on screen and empty."""
-        if self.entry_y is not None and not self.entry.get():
-            self.hint.place(x=PAD + 2, y=self.entry_y + 1,
-                            width=int(self.db["width"]) - 2 * PAD - 4,
-                            height=ENTRY_H - 2)
-            self.hint.lift()
-        else:
-            self.hint.place_forget()
-
-    # -- render -------------------------------------------------------------
-
-    def render(self):
-        for w in self.cards:
-            w.destroy()
-        self.cards = []
-
-        ghost = self.mode == "ghost"
-        bg = KEY if ghost else CARD_BG
-        width = int(self.db["width"])
-        inner = width - 2 * PAD
-
-        tasks = apply_filters(self.db["tasks"], self.db["filters"])
-        self.buckets = build_buckets(tasks, self.bar.today, self.db["show_done"])
-        self.bucket_ranges = {}
-        keys = [b.key for b in self.buckets]
-        if self.db["active"] is not None and self.db["active"] not in keys:
-            self.db["active"] = keys[0] if keys else None
-
-        y = bottom = TOP_H
-        for b in self.buckets:
-            expanded = b.key == self.db["active"]
-            rows = b.rows(self.db["show_done"]) if expanded else []
-            body = BODY_TOP + max(1, len(rows)) * ROW_H + BODY_BOT if expanded else 0
-            h = HDR_H + body
-
-            card = tk.Frame(self.content, bg=bg)
-            card.place(x=PAD, y=y, width=inner, height=h)
-            self.cards.append(card)
-            self.bucket_ranges[b.key] = (y, y + h)
-            self._header(card, b, inner, h, expanded, bg, ghost)
-            if expanded:
-                self._body(card, b, rows, inner, bg, ghost)
-
-            bottom = y + h
-            # collapsed cards tuck under the next one; expanded ones stand clear
-            y += (h + GAP) if expanded else (HDR_H - OVERLAP)
-
-        if not self.buckets:
-            msg = "no task matches the filter" if self.db["filters"] else \
-                  "nothing planned yet"
-            empty = self._label(self.content, msg, PAD + 2, y, inner, 20,
-                                FONT_DIM, TEXT_DIM, bg, ghost)
-            self.cards.append(empty)
-            bottom = y + 20
-
-        if ghost:
-            self.entry.place_forget()
-            self.entry_y = None
-            total_h = bottom + PAD
-        else:
-            self.entry_y = bottom + GAP
-            self.entry.place(x=PAD, y=self.entry_y, width=inner, height=ENTRY_H)
-            total_h = bottom + GAP + ENTRY_H + PAD
-        self.sync_hint()
-
-        self.attributes("-alpha", 1.0 if ghost else self.db["alpha"])
-        self.content_h = total_h
-        self.win_w = width
-        self.content.configure(width=width, height=total_h)
-        self.canvas.itemconfigure(self.content_window, width=width, height=total_h)
-        self.canvas.configure(scrollregion=(0, 0, width, total_h))
-        self._resize_viewport(min(total_h, self.winfo_screenheight() - BAR_H - 2 * BAR_GAP))
-
-    def place_near(self, bar_x, bar_y, above):
-        if not self.bar.panel_should_show():
-            self.withdraw()
-            return
-        self.deiconify()
-        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        available = bar_y - BAR_GAP if above else sh - bar_y - BAR_H - BAR_GAP
-        self._resize_viewport(min(self.content_h, max(80, available)))
-        y = (bar_y - BAR_GAP - self.win_h) if above else (bar_y + BAR_H + BAR_GAP)
-        x = max(0, min(bar_x, sw - self.win_w))
-        y = max(0, min(y, sh - self.win_h))
-        self.geometry("%dx%d+%d+%d" % (self.win_w, self.win_h, x, y))
-
-    def _resize_viewport(self, height):
-        self.win_h = max(1, int(height))
-        self.canvas.place(x=0, y=0, width=self.win_w, height=self.win_h)
-        self._set_scroll(self.scroll_y)
-
-    def _set_scroll(self, offset):
-        """Offset the content by moving the canvas item, not the canvas view.
-
-        yview_moveto clamps against the canvas's *realized* height, which is
-        still the old one until the geometry manager catches up - so the first
-        scroll after a re-render silently did nothing, which is precisely when
-        select() and reveal() ask to bring a card into view. Repositioning the
-        window item is exact and needs no idle pass.
-        """
-        limit = max(0, self.content_h - self.win_h)
-        self.scroll_y = max(0, min(int(offset), limit))
-        self.canvas.coords(self.content_window, 0, -self.scroll_y)
-        self._sync_scrollbar(limit)
-
-    def _sync_scrollbar(self, limit):
-        """Show a thumb only while there is somewhere to scroll to.
-
-        Hidden in ghost mode: a floating bar with no panel behind it would be
-        the one opaque thing left on screen.
-        """
-        if limit <= 0 or self.mode == "ghost":
-            self.scrollbar.place_forget()
-            return
-        track = max(1, self.win_h - 2 * PAD)
-        thumb = max(20, int(track * self.win_h / self.content_h))
-        y = PAD + int((track - thumb) * (self.scroll_y / limit))
-        self.scrollbar.place(x=self.win_w - 5, y=y, width=3, height=thumb)
-        self.scrollbar.lift()
-
-    def _on_mousewheel(self, event):
-        if self.content_h <= self.win_h:
-            return None
-        direction = -1 if event.delta > 0 else 1
-        self._set_scroll(self.scroll_y + direction * ROW_H * 3)
-        return "break"
-
-    def scroll_to_bucket(self, key):
-        span = self.bucket_ranges.get(key)
-        if not span:
-            return
-        top, bottom = span
-        if top < self.scroll_y:
-            self._set_scroll(top)
-        elif bottom > self.scroll_y + self.win_h:
-            self._set_scroll(bottom - self.win_h)
-
-    def _label(self, parent, text, x, y, w, h, font, fg, bg, ghost,
-               anchor="w"):
-        """Place a string, haloed in ghost mode.
-
-        Ghost mode has no panel behind the text, so light text landing on
-        light pixels of the app underneath becomes unreadable. Four offset
-        copies in black give every glyph a 1px dark outline, which separates
-        it from whatever it happens to be sitting on.
-        """
-        if ghost:
-            for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-                tk.Label(parent, text=text, font=font, fg=GHOST_HALO, bg=bg,
-                         anchor=anchor).place(x=x + dx, y=y + dy,
-                                              width=w, height=h)
-        lbl = tk.Label(parent, text=text, font=font, fg=fg, bg=bg, anchor=anchor)
-        lbl.place(x=x, y=y, width=w, height=h)
-        return lbl
-
-    def _header(self, card, b, inner, h, expanded, bg, ghost):
-        hdr = tk.Frame(card, bg=bg, cursor="hand2")
-        hdr.place(x=0, y=0, width=inner, height=HDR_H)
-        title = self._label(hdr, "%s  %s" % (CARET[expanded], b.title),
-                            12, 0, inner - 84, HDR_H,
-                            FONT_HDR, b.accent, bg, ghost)
-        badge = self._label(hdr, b.badge(), inner - 70, 0, 58, HDR_H,
-                            FONT_DIM, b.accent if ghost else TEXT_DIM, bg,
-                            ghost, anchor="e")
-
-        if not ghost:
-            # drawn after the header so they sit on top of it: the edge is what
-            # makes the stack read as separate sheets rather than one dark slab
-            tk.Frame(card, bg=CARD_EDGE).place(x=0, y=0, width=inner, height=1)
-            tk.Frame(card, bg=b.accent).place(x=0, y=0, width=3, height=h)
-
-        for w in (hdr, title, badge):
-            w.bind("<Button-1>", lambda e, k=b.key: self.select(k))
-            w.bind("<Button-3>", self.bar.menu_event)
-
-        if expanded and not ghost:
-            tk.Frame(card, bg=CARD_EDGE).place(x=12, y=HDR_H - 1,
-                                               width=inner - 24, height=1)
-
-    def _body(self, card, b, rows, inner, bg, ghost):
-        if not rows:
-            self._label(card, "empty", 32, HDR_H + BODY_TOP, inner - 44, ROW_H,
-                        FONT_DIM, TEXT_DIM, bg, ghost)
-            return
-        y = HDR_H + BODY_TOP
-        for d, t in rows:
-            self._row(card, b, d, t, y, inner, bg, ghost)
-            y += ROW_H
-
-    def _row(self, card, b, d, t, y, inner, bg, ghost):
-        status = t["status"]
-        done = status == "done"
-        glyph_fg = {"todo": TEXT_DIM, "doing": b.accent, "done": TEXT_DONE}[status]
-
-        g = self._label(card, GLYPH[status], 11, y, 18, ROW_H,
-                        FONT_ROW, glyph_fg, bg, ghost, anchor="center")
-        g.configure(cursor="hand2")
-
-        date_w = 46 if (b.show_dates and d) else 0
-        lbl = self._label(card, t["text"], 32, y, inner - 44 - date_w, ROW_H,
-                          self.font_done if done else self.font_row,
-                          TEXT_DONE if done else TEXT, bg, ghost)
-
-        g.bind("<Button-1>", lambda e, i=t["id"]: self.cycle(i))
-        lbl.bind("<Double-Button-1>", lambda e, i=t["id"]: self.edit(i))
-        for w in (g, lbl):
-            w.bind("<Button-3>",
-                   lambda e, i=t["id"]: self.bar.open_task_menu(e.x_root,
-                                                                e.y_root, i))
-
-        if date_w:
-            self._label(card, fmt_short(d), inner - 12 - date_w, y, date_w,
-                        ROW_H, FONT_DIM, TEXT_DONE if done else TEXT_DIM,
-                        bg, ghost, anchor="e")
-
-    # -- actions ------------------------------------------------------------
-
-    def select(self, key):
-        # clicking the open card again closes it, so the stack can sit flat
-        self.db["active"] = None if self.db["active"] == key else key
-        self.bar.save()
-        self.refresh()
-        if self.db["active"] == key:
-            self.scroll_to_bucket(key)
-
-    def cycle(self, tid):
-        t = self.find(tid)
-        if t:
-            t["status"] = NEXT_STATUS[t["status"]]
-            self.bar.save()
-            self.refresh()
-
-    def set_status(self, tid, status):
-        t = self.find(tid)
-        if t:
-            t["status"] = status
-            self.bar.save()
-            self.refresh()
-
-    def set_due(self, tid, shorthand):
-        t = self.find(tid)
-        if not t:
-            return
-        d = parse_due(shorthand, self.bar.today) if shorthand else None
-        t["due"] = d.isoformat() if d else None
-        self.bar.save()
-        self.refresh()
-        self.reveal(tid)
-
-    def delete(self, tid):
-        gone = [t for t in self.db["tasks"] if t["id"] == tid]
-        self.bar.push_undo(gone)
-        self.db["tasks"] = [t for t in self.db["tasks"] if t["id"] != tid]
-        if self.editing == tid:
-            self.cancel_entry()
-        self.bar.save()
-        self.refresh()
-
-    def edit(self, tid):
-        t = self.find(tid)
-        if not t:
-            return
-        self.editing = tid
-        raw = t["text"] + (" @" + t["due"] if t["due"] else "")
-        self.entry.configure(highlightbackground=ACCENTS[3],
-                             highlightcolor=ACCENTS[3])
-        self.entry.delete(0, "end")
-        self.entry.insert(0, raw)
-        self.sync_hint()
-        self.focus_entry()
-        self.entry.select_range(0, "end")
-        self.entry.icursor("end")
-
-    def focus_entry(self):
-        if self.mode == "ghost":
-            self.bar.toggle_mode()
-        self._set_scroll(self.content_h - self.win_h)
-        self.focus_force()               # overrideredirect windows need a shove
-        self.entry.focus_set()
-
-    def cancel_entry(self, e=None):
-        self.editing = None
-        self.entry.delete(0, "end")
-        self.entry.configure(highlightbackground=CARD_EDGE,
-                             highlightcolor=ACCENTS[2])
-        self.sync_hint()
-
-    def commit_entry(self, e=None):
-        raw = self.entry.get().strip()
-        if not raw:
-            return self.cancel_entry()
-        text, due = split_due(raw, self.bar.today)
-        if not text:
-            return self.cancel_entry()
-        iso = due.isoformat() if due else None
-
-        if self.editing is not None:
-            t = self.find(self.editing)
-            if t:
-                t["text"], t["due"] = text, iso
-            target = self.editing
-        else:
-            target = self.db["next_id"]
-            self.db["next_id"] += 1
-            self.db["tasks"].append(
-                {"id": target, "text": text, "due": iso, "status": "todo"})
-
-        self.cancel_entry()
-        self.bar.save()
-        self.refresh()
-        self.reveal(target)
-        self.entry.focus_set()
-
-    def reveal(self, tid):
-        """Open whichever card the task just landed in.
-
-        A task can be invisible here: if an active filter excludes it, it is
-        in no bucket at all, and the stack is left as it was.
-        """
-        for b in self.buckets:
-            if any(t["id"] == tid for _, t in b.pairs):
-                if b.key != self.db["active"]:
-                    self.db["active"] = b.key
-                    self.bar.save()
-                    self.refresh()
-                self.scroll_to_bucket(b.key)
-                return
 
 
 # ---------------------------------------------------------------------------

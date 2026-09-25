@@ -46,7 +46,7 @@ That writes three months of everyday-life tasks — one busy, one regular, one
 quiet — shaped to exercise every branch of the bucketing rule. It refuses to
 overwrite an existing board unless you pass `--force`, and keeps a `.bak`.
 
-## The two pieces
+## The bar and its modules
 
 **The bar** is the always-visible strip. On first run it finds your real
 taskbar via `SPI_GETWORKAREA` and parks itself on it, but you can drag it
@@ -55,14 +55,28 @@ progress meter, and the next thing due — in red if that next thing is
 already late. It stays near-solid whatever else you set, because it is the
 one thing always guaranteed clickable.
 
-**The panel** is the post-it stack. It unfolds above the bar (or below, if
-you drag the bar to the top half of the screen) and tucks away again.
+![Three modules docked in a row above the bar](docs/modules.png)
 
-Only the bar is permanent. The panel, the search field and the menus are
+**The modules** are summoned by the buttons on the left of the bar. Each one
+is its own window:
+
+| module | what it shows |
+| --- | --- |
+| **Board** | the post-it stack of time buckets, plus the task input |
+| **Today** | overdue, today and tomorrow — nothing else |
+| **Stats** | open / late / done at a glance, and the next seven days |
+
+A module starts **docked**: laid out in a row beside the bar, following it
+wherever you drag it. Grab its header and it **detaches** — it floats where
+you dropped it and stays there, independent of the bar and of every other
+module. A dot beside the module's name means it is floating. Double-click
+the header, or pick **Dock all modules**, to send it back to the row.
+
+Only the bar is permanent. The modules, the search field and the menus are
 transient — they show while the app has focus and get out of the way the
 moment you click back into whatever you were doing. Clicking the bar brings
-them back. Uncheck **Hide panel when unfocused** in the bar menu if you would
-rather the panel stayed put.
+them back. Uncheck **Hide when unfocused** in the bar menu if you would
+rather they stayed put.
 
 Ghost mode is exempt from that, deliberately: reading your tasks while you
 work in another window is the whole point of it, so auto-hiding there would
@@ -90,7 +104,7 @@ the board back down instead of fragmenting it further — a month with four
 open and six done stays one card.
 
 When the expanded stack is taller than the available screen space, use the
-mouse wheel over the panel to scroll it.
+mouse wheel over a module to scroll it.
 
 Stage lives per task instead: click the glyph to cycle ○ todo → ◐ doing →
 ● done.
@@ -128,7 +142,7 @@ one card again.
 
 ## Adding tasks
 
-Type in the field at the bottom of the panel. A trailing `@` sets the date:
+Type in the field at the bottom of the Board module. A trailing `@` sets the date:
 
 | you type | you get |
 | --- | --- |

@@ -127,6 +127,47 @@ class PackagingTests(unittest.TestCase):
             app.release_single_instance()
 
 
+class ModuleStateTests(unittest.TestCase):
+    """Per-module open/position state, including the pre-module migration."""
+
+    def test_defaults_open_only_the_board(self):
+        mods = app._clean_modules({})
+        self.assertEqual(sorted(mods), sorted(app.MODULE_KEYS))
+        self.assertTrue(mods["board"]["open"])
+        self.assertFalse(mods["today"]["open"])
+        self.assertTrue(all(m["pos"] is None for m in mods.values()))
+
+    def test_old_panel_open_flag_migrates_to_the_board(self):
+        self.assertFalse(app._clean_modules({"panel_open": False})["board"]["open"])
+        self.assertTrue(app._clean_modules({"panel_open": True})["board"]["open"])
+
+    def test_explicit_module_state_wins_over_the_legacy_flag(self):
+        mods = app._clean_modules({
+            "panel_open": False,
+            "modules": {"board": {"open": True, "pos": [12, 34]}},
+        })
+        self.assertTrue(mods["board"]["open"])
+        self.assertEqual(mods["board"]["pos"], [12, 34])
+
+    def test_junk_is_discarded_rather_than_crashing_placement(self):
+        mods = app._clean_modules({"modules": {
+            "board": {"open": True, "pos": ["x", None]},
+            "today": {"open": True, "pos": [1, 2, 3]},
+            "stats": "not a dict",
+            "bogus": {"open": True},
+        }})
+        self.assertIsNone(mods["board"]["pos"])
+        self.assertIsNone(mods["today"]["pos"])
+        self.assertIsNone(mods["stats"]["pos"])
+        self.assertNotIn("bogus", mods)
+
+    def test_booleans_are_not_mistaken_for_coordinates(self):
+        # bool is a subclass of int, so a naive isinstance check lets
+        # [True, False] through and the window lands at 1,0
+        mods = app._clean_modules({"modules": {"board": {"pos": [True, False]}}})
+        self.assertIsNone(mods["board"]["pos"])
+
+
 class ReleaseTests(unittest.TestCase):
     """The build reads __version__ out of the source with a regex.
 
