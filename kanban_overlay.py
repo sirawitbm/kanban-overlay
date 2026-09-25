@@ -1,12 +1,12 @@
 """
-Overlay Board
+Kanban Overlay
 =============
 A see-through, always-on-top planning board for Windows. It sits over
 whatever you are actually working in (IDE, browser, game) and shows what is
 left and what is done, without taking a taskbar slot or a chunk of screen.
 
-Run:    pythonw overlay_board.py   (no console window)
-        python  overlay_board.py   (console window, useful for debugging)
+Run:    pythonw kanban_overlay.py   (no console window)
+        python  kanban_overlay.py   (console window, useful for debugging)
 
 Deps:   none - standard library tkinter only.
 
@@ -87,7 +87,7 @@ Typing a task accepts a trailing @date shorthand:
     Fix login bug @fri          Call vendor @tomorrow     Ship v1 @2026-10-03
     Renew domain @+2w           Standup @mon              Invoice @10/3
 
-State lives in OverlayBoard.json next to this script - tasks, window
+State lives in KanbanOverlay.json next to this script - tasks, window
 position, mode, opacity. Plain JSON, safe to hand-edit while closed.
 
 Known limitations:
@@ -135,11 +135,14 @@ def data_dir():
     if (APP_DIR / "portable.flag").exists():
         return APP_DIR
     local_appdata = os.environ.get("LOCALAPPDATA")
-    return Path(local_appdata) / "OverlayBoard" if local_appdata else APP_DIR
+    return Path(local_appdata) / "KanbanOverlay" if local_appdata else APP_DIR
 
 
-STORE = data_dir() / "OverlayBoard.json"
+STORE = data_dir() / "KanbanOverlay.json"
 BACKUP_STORE = STORE.with_suffix(".json.bak")
+# the app was called Overlay Board before; read a board left by that name so
+# the rename does not look like every task disappearing
+LEGACY_STORE = data_dir() / "OverlayBoard.json"
 
 MAX_PER_CARD = 5                    # more open tasks than this -> split finer
 WIDTHS = (260, 300, 360, 440)
@@ -301,6 +304,8 @@ def load_state():
     saved = _read_state(STORE)
     if saved is None:
         saved = _read_state(BACKUP_STORE)
+    if saved is None:
+        saved = _read_state(LEGACY_STORE)   # board from before the rename
     if saved:
         db.update({k: v for k, v in saved.items() if k in DEFAULTS})
 
@@ -372,7 +377,7 @@ def startup_shortcut():
     if not appdata:
         return None
     return (Path(appdata) / "Microsoft" / "Windows" / "Start Menu" /
-            "Programs" / "Startup" / "OverlayBoard.cmd")
+            "Programs" / "Startup" / "KanbanOverlay.cmd")
 
 
 def startup_enabled():
@@ -952,7 +957,7 @@ def foreground_is_ours():
 ERROR_ALREADY_EXISTS = 183
 
 
-def acquire_single_instance(name="Local\\OverlayBoard"):
+def acquire_single_instance(name="Local\\KanbanOverlay"):
     """Hold a Windows named mutex for the life of the process.
 
     The use_last_error handle matters: reading the code back through
@@ -1990,7 +1995,7 @@ class TrayIcon:
     it must never stop the app from starting.
     """
 
-    CLASS_NAME = "OverlayBoardTrayWindow"
+    CLASS_NAME = "KanbanOverlayTrayWindow"
 
     MAX_TRIES = 5
 
@@ -2037,8 +2042,8 @@ class TrayIcon:
                                              wintypes.LPCWSTR))
         if icon:
             return icon
-        for path in (APP_DIR / "OverlayBoard.ico",
-                     HERE / "assets" / "OverlayBoard.ico"):
+        for path in (APP_DIR / "KanbanOverlay.ico",
+                     HERE / "assets" / "KanbanOverlay.ico"):
             if path.exists():
                 icon = U.LoadImageW(None, str(path), IMAGE_ICON, 0, 0,
                                     LR_LOADFROMFILE | LR_DEFAULTSIZE)
@@ -2057,7 +2062,7 @@ class TrayIcon:
         U.RegisterClassW(ctypes.byref(self._cls))
 
         self.hwnd = U.CreateWindowExW(
-            WS_EX_TOOLWINDOW, self.CLASS_NAME, "Overlay Board", 0,
+            WS_EX_TOOLWINDOW, self.CLASS_NAME, "Kanban Overlay", 0,
             0, 0, 0, 0, None, None, self._cls.hInstance, None)
         if not self.hwnd:
             raise OSError("could not create the tray window")
@@ -2075,7 +2080,7 @@ class TrayIcon:
         nid.uFlags = NIF_MESSAGE | NIF_TIP | (NIF_ICON if icon else 0)
         nid.uCallbackMessage = TRAY_CALLBACK
         nid.hIcon = icon or 0
-        nid.szTip = "Overlay Board"
+        nid.szTip = "Kanban Overlay"
         if not SH.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid)):
             return False
         self.nid = nid
@@ -2681,7 +2686,7 @@ class Bar(tk.Tk):
             pass
         x, y = self.winfo_pointerx(), self.winfo_pointery()
         items = [
-            {"label": "Show Overlay Board" if self.hidden else "Hide from screen",
+            {"label": "Show Kanban Overlay" if self.hidden else "Hide from screen",
              "cmd": lambda: self.set_hidden(not self.hidden)},
             {"kind": "sep"},
         ]
@@ -2929,7 +2934,7 @@ class Spotlight(tk.Toplevel):
 def main():
     if not acquire_single_instance():
         U.MessageBoxW(
-            None, "Overlay Board is already running.", "Overlay Board", 0x40)
+            None, "Kanban Overlay is already running.", "Kanban Overlay", 0x40)
         return
     try:
         Bar(load_state()).mainloop()

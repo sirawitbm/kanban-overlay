@@ -1,5 +1,5 @@
 """
-Seed OverlayBoard.json with a realistic month-by-month demo board.
+Seed KanbanOverlay.json with a realistic month-by-month demo board.
 
     python seed_demo.py            # refuses to clobber an existing board
     python seed_demo.py --force    # overwrites, keeping a .bak
@@ -32,7 +32,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-STORE = HERE / "OverlayBoard.json"
+STORE = HERE / "KanbanOverlay.json"
 
 
 def month_end(y, m):

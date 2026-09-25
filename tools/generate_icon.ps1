@@ -10,7 +10,7 @@ public static class NativeIcon {
 "@
 
 $assetDir = Join-Path $PSScriptRoot "..\assets"
-$iconPath = Join-Path $assetDir "OverlayBoard.ico"
+$iconPath = Join-Path $assetDir "KanbanOverlay.ico"
 New-Item -ItemType Directory -Path $assetDir -Force | Out-Null
 
 $bitmap = New-Object System.Drawing.Bitmap 256, 256

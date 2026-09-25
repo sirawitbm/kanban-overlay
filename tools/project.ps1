@@ -1,25 +1,25 @@
 # Single source of truth for release metadata.
 #
-# The version is read out of overlay_board.py rather than repeated here, so
+# The version is read out of kanban_overlay.py rather than repeated here, so
 # the git tag, the version stamped into the EXE, and the installer name
 # cannot drift apart. Bump __version__ and everything downstream follows.
 
 $ProjectRoot = Split-Path $PSScriptRoot -Parent
 
-$sourcePath = Join-Path $ProjectRoot "overlay_board.py"
+$sourcePath = Join-Path $ProjectRoot "kanban_overlay.py"
 $source = Get-Content $sourcePath -Raw
 if ($source -notmatch '(?m)^__version__\s*=\s*"(?<v>\d+\.\d+\.\d+)"') {
     throw "Could not read a semantic __version__ from $sourcePath."
 }
 
 $ProjectVersion   = $Matches.v
-$ProjectName      = "Overlay Board"
-$ProjectExeName   = "OverlayBoard"
+$ProjectName      = "Kanban Overlay"
+$ProjectExeName   = "KanbanOverlay"
 
 # Shown in the EXE's file properties and the installer's publisher field.
 # Change it here only - both consumers read this one value.
 $ProjectPublisher = "Sirawit Butmaratthaya"
-$ProjectUrl       = "https://github.com/sirawitbm/overlay-board"
+$ProjectUrl       = "https://github.com/sirawitbm/kanban-overlay"
 
 function New-VersionInfoFile {
     <#

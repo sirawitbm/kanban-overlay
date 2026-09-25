@@ -1,4 +1,4 @@
-# Overlay Board
+# Kanban Overlay
 
 A see-through planning board that lives on your Windows taskbar.
 
@@ -14,10 +14,10 @@ No dependencies. One file, standard-library `tkinter`, Python 3.9+.
 
 ## Download
 
-**[Download the latest Windows release](https://github.com/sirawitbm/overlay-board/releases/latest)**
+**[Download the latest Windows release](https://github.com/sirawitbm/kanban-overlay/releases/latest)**
 
-Download `OverlayBoard-v0.1.0-Setup.exe` for the normal installation. It adds
-Overlay Board to the Start menu, supports an optional desktop shortcut, and
+Download `KanbanOverlay-v0.1.0-Setup.exe` for the normal installation. It adds
+Kanban Overlay to the Start menu, supports an optional desktop shortcut, and
 does not require administrator access.
 
 Windows SmartScreen may warn about the app because releases are not digitally
@@ -25,15 +25,15 @@ signed. Download only from this repository, verify the accompanying SHA-256
 file, and scan the installer with Microsoft Defender. You can also build from
 source if you prefer.
 
-The portable release is named `OverlayBoard-v0.1.0-windows-x64.zip`. Extract
-the whole folder before running `OverlayBoard.exe`; `portable.flag` tells the
+The portable release is named `KanbanOverlay-v0.1.0-windows-x64.zip`. Extract
+the whole folder before running `KanbanOverlay.exe`; `portable.flag` tells the
 app to keep its board data in that folder.
 
 ## Run from source
 
 ```
-pythonw overlay_board.py      # no console window
-python  overlay_board.py      # console window, for debugging
+pythonw kanban_overlay.py      # no console window
+python  kanban_overlay.py      # console window, for debugging
 ```
 
 To try it with a populated board first:
@@ -190,13 +190,13 @@ hotkeys. The bar is always clickable, which is the deliberate escape hatch.
 
 Tasks, bar position, mode, opacity, and active filters live in one plain JSON
 file. Installed releases store it at
-`%LOCALAPPDATA%\OverlayBoard\OverlayBoard.json`; portable and source runs keep
+`%LOCALAPPDATA%\KanbanOverlay\KanbanOverlay.json`; portable and source runs keep
 it beside the executable or script. Source data is git-ignored so your actual
 tasks never land in a commit.
 
 Writes go to a temp file and are renamed over the real one, so a crash
 mid-save cannot leave a half-written board. The previous state is retained as
-`OverlayBoard.json.bak` and loaded automatically if the primary file is
+`KanbanOverlay.json.bak` and loaded automatically if the primary file is
 damaged. Only one app instance can run at a time, preventing two copies from
 overwriting one another.
 
@@ -244,4 +244,4 @@ taskbar that you glance at rather than attend to.
 
 ## License
 
-Overlay Board is released under the [MIT License](LICENSE).
+Kanban Overlay is released under the [MIT License](LICENSE).

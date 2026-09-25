@@ -45,7 +45,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: OverlayBoard-v${{ env.RELEASE_VERSION }}-windows-x64
+          name: KanbanOverlay-v${{ env.RELEASE_VERSION }}-windows-x64
           path: |
             dist/release/*.zip
             dist/release/*-Setup.exe

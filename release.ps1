@@ -7,24 +7,24 @@ param(
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "tools\project.ps1")
 
-# overlay_board.py owns the version. An explicit -Version (the tag, in CI) is
+# kanban_overlay.py owns the version. An explicit -Version (the tag, in CI) is
 # only allowed to agree with it, so a tag can never ship an EXE stamped with
 # a different number than the installer around it.
 if (-not $Version) {
     $Version = $ProjectVersion
 } elseif ($Version -ne $ProjectVersion) {
-    throw ("Version mismatch: asked for $Version but overlay_board.py " +
+    throw ("Version mismatch: asked for $Version but kanban_overlay.py " +
            "declares $ProjectVersion. Bump __version__ and re-tag.")
 }
 
-$exePath = Join-Path $PSScriptRoot "dist\OverlayBoard.exe"
+$exePath = Join-Path $PSScriptRoot "dist\KanbanOverlay.exe"
 $releaseDir = Join-Path $PSScriptRoot "dist\release"
-$artifactName = "OverlayBoard-v$Version-windows-x64"
+$artifactName = "KanbanOverlay-v$Version-windows-x64"
 $zipPath = Join-Path $releaseDir "$artifactName.zip"
 $zipChecksumPath = "$zipPath.sha256"
-$installerPath = Join-Path $releaseDir "OverlayBoard-v$Version-Setup.exe"
+$installerPath = Join-Path $releaseDir "KanbanOverlay-v$Version-Setup.exe"
 $installerChecksumPath = "$installerPath.sha256"
-$stageRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("OverlayBoard-release-" + [guid]::NewGuid())
+$stageRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("KanbanOverlay-release-" + [guid]::NewGuid())
 $stageApp = Join-Path $stageRoot $artifactName
 
 if (-not $SkipBuild) {
@@ -53,13 +53,13 @@ try {
         $relativePaths = @($archive.Entries | ForEach-Object {
             $_.FullName -replace '^[^/\\]+[/\\]', ''
         })
-        $required = @('OverlayBoard.exe', 'portable.flag', 'README.md', 'LICENSE')
+        $required = @('KanbanOverlay.exe', 'portable.flag', 'README.md', 'LICENSE')
         $missing = $required | Where-Object { $_ -notin $relativePaths }
         if ($missing) {
             throw "Release is missing required files: $($missing -join ', ')"
         }
         $private = $relativePaths | Where-Object {
-            $_ -in @('OverlayBoard.json', 'OverlayBoard.json.bak', 'OverlayBoard.json.tmp')
+            $_ -in @('KanbanOverlay.json', 'KanbanOverlay.json.bak', 'KanbanOverlay.json.tmp')
         }
         if ($private) {
             throw "Release contains private runtime files: $($private -join ', ')"

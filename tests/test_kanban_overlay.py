@@ -9,7 +9,7 @@ from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
-import overlay_board as app
+import kanban_overlay as app
 
 
 def task(task_id, text, due=None, status="todo"):
@@ -65,8 +65,8 @@ class StateTests(unittest.TestCase):
         root = Path(self.temp.name)
         self.store_patch = patch.multiple(
             app,
-            STORE=root / "OverlayBoard.json",
-            BACKUP_STORE=root / "OverlayBoard.json.bak",
+            STORE=root / "KanbanOverlay.json",
+            BACKUP_STORE=root / "KanbanOverlay.json.bak",
         )
         self.store_patch.start()
 
@@ -113,13 +113,13 @@ class PackagingTests(unittest.TestCase):
             with patch.object(sys, "frozen", True, create=True), \
                     patch.object(app, "APP_DIR", app_dir), \
                     patch.dict(os.environ, {"LOCALAPPDATA": str(root / "local")}):
-                self.assertEqual(app.data_dir(), root / "local" / "OverlayBoard")
+                self.assertEqual(app.data_dir(), root / "local" / "KanbanOverlay")
                 (app_dir / "portable.flag").touch()
                 self.assertEqual(app.data_dir(), app_dir)
 
     @unittest.skipUnless(os.name == "nt", "Windows named mutex")
     def test_second_instance_is_rejected(self):
-        name = "Local\\OverlayBoard-test-" + str(uuid.uuid4())
+        name = "Local\\KanbanOverlay-test-" + str(uuid.uuid4())
         self.assertTrue(app.acquire_single_instance(name))
         try:
             self.assertFalse(app.acquire_single_instance(name))
@@ -202,6 +202,24 @@ class ModuleStateTests(unittest.TestCase):
         # [True, False] through and the window lands at 1,0
         mods = app._clean_modules({"modules": {"board": {"pos": [True, False]}}})
         self.assertIsNone(mods["board"]["pos"])
+
+
+    def test_a_board_from_before_the_rename_is_still_read(self):
+        """The app used to be called Overlay Board.
+
+        Renaming the store would have looked, to anyone upgrading, exactly
+        like every task vanishing.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            legacy = Path(tmp) / "OverlayBoard.json"
+            legacy.write_text(json.dumps({
+                "tasks": [task(1, "Survived the rename", "2026-09-25")],
+            }), encoding="utf-8")
+            with patch.object(app, "STORE", Path(tmp) / "KanbanOverlay.json"),                  patch.object(app, "BACKUP_STORE",
+                              Path(tmp) / "KanbanOverlay.json.bak"),                  patch.object(app, "LEGACY_STORE", legacy):
+                db = app.load_state()
+        self.assertEqual([t["text"] for t in db["tasks"]],
+                         ["Survived the rename"])
 
 
 class ReleaseTests(unittest.TestCase):
