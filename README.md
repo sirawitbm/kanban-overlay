@@ -8,11 +8,28 @@ giving up a window, a taskbar slot, or a chunk of screen. Sticky Notes can
 float, but it cannot tell you what is done; a kanban app can tell you, but it
 wants the whole screen.
 
-No dependencies. One file, standard-library `tkinter`, Python 3.8+.
+No dependencies. One file, standard-library `tkinter`, Python 3.9+.
 
 ![The bar docked on the taskbar with the panel unfolded above it](docs/board.png)
 
-## Run it
+## Download
+
+**[Download the latest Windows release](https://github.com/sirawitbm/overlay-board/releases/latest)**
+
+Download `OverlayBoard-v0.1.0-Setup.exe` for the normal installation. It adds
+Overlay Board to the Start menu, supports an optional desktop shortcut, and
+does not require administrator access.
+
+Windows SmartScreen may warn about the app because releases are not digitally
+signed. Download only from this repository, verify the accompanying SHA-256
+file, and scan the installer with Microsoft Defender. You can also build from
+source if you prefer.
+
+The portable release is named `OverlayBoard-v0.1.0-windows-x64.zip`. Extract
+the whole folder before running `OverlayBoard.exe`; `portable.flag` tells the
+app to keep its board data in that folder.
+
+## Run from source
 
 ```
 pythonw overlay_board.py      # no console window
@@ -55,6 +72,9 @@ sorts by *when*, and re-sorts itself as the list grows:
 Completed tasks never count toward that threshold. Finishing work collapses
 the board back down instead of fragmenting it further — a month with four
 open and six done stays one card.
+
+When the expanded stack is taller than the available screen space, use the
+mouse wheel over the panel to scroll it.
 
 Stage lives per task instead: click the glyph to cycle ○ todo → ◐ doing →
 ● done.
@@ -124,11 +144,17 @@ hotkeys. The bar is always clickable, which is the deliberate escape hatch.
 
 ## Your data
 
-Everything lives in `OverlayBoard.json` next to the script: tasks, bar
-position, mode, opacity, active filters. Plain JSON, safe to hand-edit while
-the app is closed, and git-ignored so your actual tasks never land in a
-commit. Writes go to a temp file and are renamed over the real one, so a
-crash mid-save cannot leave you with a half-written board.
+Tasks, bar position, mode, opacity, and active filters live in one plain JSON
+file. Installed releases store it at
+`%LOCALAPPDATA%\OverlayBoard\OverlayBoard.json`; portable and source runs keep
+it beside the executable or script. Source data is git-ignored so your actual
+tasks never land in a commit.
+
+Writes go to a temp file and are renamed over the real one, so a crash
+mid-save cannot leave a half-written board. The previous state is retained as
+`OverlayBoard.json.bak` and loaded automatically if the primary file is
+damaged. Only one app instance can run at a time, preventing two copies from
+overwriting one another.
 
 **Run at login** is in the bar menu. It drops a small `.cmd` in your Startup
 folder rather than a shortcut, since shortcuts would mean a COM dependency.
@@ -141,14 +167,37 @@ folder rather than a shortcut, since shortcuts would mean a COM dependency.
 - Filters are plain case-insensitive substring matches on task text. There is
   no field syntax — no `due:`, no `status:`.
 - Placement uses the primary monitor's geometry, so a bar dragged to a second
-  monitor may be clamped back on the next launch.
-- The panel does not scroll. A very tall stack can run off screen — collapse
-  cards, filter, or clear completed.
+  monitor may be clamped back on the next launch. Use **Reset position** from
+  the bar menu if it becomes difficult to recover.
 - Weeks are Monday-start and clipped to the month they split out of, so a
   week straddling a month boundary can appear as two short cards.
+
+## Building a release
+
+Run the tests and build the standalone executable:
+
+```powershell
+python -m unittest discover -s tests -v
+.\build.ps1
+```
+
+Create the installer, portable ZIP, and SHA-256 files with Inno Setup 6
+installed:
+
+```powershell
+.\release.ps1 -Version 0.1.0
+```
+
+Artifacts are written to `dist\release`. Pushing a semantic version tag such
+as `v0.1.0` runs the same tests and packaging process on GitHub Actions, then
+publishes the artifacts as a GitHub Release.
 
 ## Credit
 
 The bar's form factor is borrowed from
 [TBH: Task Bar Hero](https://tbhtaskbarhero.com/) — a thing docked to the
 taskbar that you glance at rather than attend to.
+
+## License
+
+Overlay Board is released under the [MIT License](LICENSE).

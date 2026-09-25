@@ -88,6 +88,7 @@ import ctypes
 import json
 import os
 import re
+import shutil
 import sys
 import tkinter as tk
 from ctypes import wintypes
@@ -95,8 +96,24 @@ from datetime import date, timedelta
 from pathlib import Path
 from tkinter import font as tkfont
 
+__version__ = "0.1.0"
+
 HERE = Path(__file__).resolve().parent
-STORE = HERE / "OverlayBoard.json"
+APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else HERE
+
+
+def data_dir():
+    """Return a writable state directory for source, installed, or portable use."""
+    if not getattr(sys, "frozen", False):
+        return HERE
+    if (APP_DIR / "portable.flag").exists():
+        return APP_DIR
+    local_appdata = os.environ.get("LOCALAPPDATA")
+    return Path(local_appdata) / "OverlayBoard" if local_appdata else APP_DIR
+
+
+STORE = data_dir() / "OverlayBoard.json"
+BACKUP_STORE = STORE.with_suffix(".json.bak")
 
 MAX_PER_CARD = 5                    # more open tasks than this -> split finer
 WIDTHS = (260, 300, 360, 440)
@@ -202,31 +219,56 @@ DEFAULTS = {
 # store
 # ---------------------------------------------------------------------------
 
+def _read_state(path):
+    try:
+        saved = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return None
+    return saved if isinstance(saved, dict) else None
+
+
 def load_state():
     db = dict(DEFAULTS)
-    if STORE.exists():
-        try:
-            saved = json.loads(STORE.read_text(encoding="utf-8"))
-        except (ValueError, OSError):
-            saved = {}
-        if isinstance(saved, dict):
-            db.update({k: v for k, v in saved.items() if k in DEFAULTS})
+    saved = _read_state(STORE)
+    if saved is None:
+        saved = _read_state(BACKUP_STORE)
+    if saved:
+        db.update({k: v for k, v in saved.items() if k in DEFAULTS})
 
     clean = []
-    for t in db["tasks"]:
+    used_ids = set()
+    raw_tasks = db["tasks"] if isinstance(db["tasks"], list) else []
+    for t in raw_tasks:
         if isinstance(t, dict) and t.get("text"):
+            try:
+                task_id = int(t.get("id") or 0)
+            except (TypeError, ValueError):
+                task_id = 0
+            if task_id <= 0 or task_id in used_ids:
+                task_id = 0
+            else:
+                used_ids.add(task_id)
             clean.append({
-                "id": int(t.get("id") or 0),
+                "id": task_id,
                 "text": str(t["text"]),
                 "due": t.get("due") or None,
                 "status": t["status"] if t.get("status") in GLYPH else "todo",
             })
-    for i, t in enumerate(clean, 1):
+    next_id = 1
+    for t in clean:
         if not t["id"]:
-            t["id"] = i
+            while next_id in used_ids:
+                next_id += 1
+            t["id"] = next_id
+            used_ids.add(next_id)
     db["tasks"] = clean
     db["next_id"] = max([t["id"] for t in clean] + [0]) + 1
-    db["filters"] = [str(f) for f in (db["filters"] or []) if str(f).strip()]
+    raw_filters = db["filters"] if isinstance(db["filters"], list) else []
+    db["filters"] = [str(f) for f in raw_filters if str(f).strip()]
+    db["show_done"] = db["show_done"] if isinstance(db["show_done"], bool) else True
+    db["panel_open"] = db["panel_open"] if isinstance(db["panel_open"], bool) else True
+    if db["active"] is not None and not isinstance(db["active"], str):
+        db["active"] = None
 
     # a hand-edited or truncated store should not crash the placement maths
     pos = db.get("pos")
@@ -272,12 +314,15 @@ def set_startup(on):
         return False
     try:
         if on:
-            pyw = Path(sys.executable).with_name("pythonw.exe")
-            if not pyw.exists():
-                pyw = Path(sys.executable)
+            if getattr(sys, "frozen", False):
+                command = 'start "" "%s"' % Path(sys.executable).resolve()
+            else:
+                pyw = Path(sys.executable).with_name("pythonw.exe")
+                if not pyw.exists():
+                    pyw = Path(sys.executable)
+                command = 'start "" "%s" "%s"' % (pyw, Path(__file__).resolve())
             f.parent.mkdir(parents=True, exist_ok=True)
-            f.write_text('@echo off\r\nstart "" "%s" "%s"\r\n'
-                         % (pyw, Path(__file__).resolve()), encoding="utf-8")
+            f.write_text("@echo off\r\n%s\r\n" % command, encoding="utf-8")
         elif f.exists():
             f.unlink()
         return True
@@ -296,7 +341,13 @@ def save_state(db):
     """
     tmp = STORE.with_name(STORE.name + ".tmp")
     try:
+        STORE.parent.mkdir(parents=True, exist_ok=True)
         tmp.write_text(json.dumps(db, indent=2), encoding="utf-8")
+        if STORE.exists():
+            try:
+                shutil.copy2(STORE, BACKUP_STORE)
+            except OSError:
+                pass
         os.replace(tmp, STORE)
     except OSError as exc:
         print("could not save:", exc, file=sys.stderr)
@@ -570,6 +621,46 @@ def work_area():
         return (r.left, r.top, r.right, r.bottom) if ok else None
     except (AttributeError, OSError):
         return None
+
+
+_INSTANCE_HANDLE = None
+
+
+ERROR_ALREADY_EXISTS = 183
+
+
+def acquire_single_instance(name="Local\\OverlayBoard"):
+    """Hold a Windows named mutex for the life of the process.
+
+    The use_last_error handle matters: reading the code back through
+    kernel32.GetLastError() is itself a foreign call, and ctypes gives no
+    guarantee the thread's last error survives it. Getting that wrong fails
+    open - two copies of the app running, both writing the same JSON, last
+    save wins - so the error comes from ctypes' own saved copy instead.
+    """
+    global _INSTANCE_HANDLE
+    if os.name != "nt":
+        return True
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW.argtypes = (wintypes.LPVOID, wintypes.BOOL,
+                                      wintypes.LPCWSTR)
+    kernel32.CreateMutexW.restype = wintypes.HANDLE
+    handle = kernel32.CreateMutexW(None, False, name)
+    err = ctypes.get_last_error()
+    if not handle:
+        return True                     # fail open rather than block launch
+    if err == ERROR_ALREADY_EXISTS:
+        kernel32.CloseHandle(handle)
+        return False
+    _INSTANCE_HANDLE = handle
+    return True
+
+
+def release_single_instance():
+    global _INSTANCE_HANDLE
+    if _INSTANCE_HANDLE and os.name == "nt":
+        ctypes.windll.kernel32.CloseHandle(_INSTANCE_HANDLE)
+    _INSTANCE_HANDLE = None
 
 
 
@@ -1060,6 +1151,11 @@ class Bar(tk.Tk):
         self.save()
         self.refresh()
 
+    def reset_position(self, *_):
+        self.db["pos"] = None
+        self.save()
+        self.refresh()
+
     # -- undo ---------------------------------------------------------------
 
     def push_undo(self, tasks):
@@ -1111,6 +1207,7 @@ class Bar(tk.Tk):
             {"label": "Add task", "accel": "Ctrl+N", "cmd": self.add_task},
             {"label": "Search", "accel": "Ctrl+F", "cmd": self.open_search},
             {"label": "Collapse all", "cmd": self.collapse_all},
+            {"label": "Reset position", "cmd": self.reset_position},
             {"kind": "sep"},
         ]
         if self.panel.ghost_ok:
@@ -1184,6 +1281,9 @@ class Panel(tk.Toplevel):
         self.buckets = []
         self.editing = None
         self.entry_y = None
+        self.scroll_y = 0
+        self.content_h = 60
+        self.bucket_ranges = {}
         self.win_w, self.win_h = int(self.db["width"]), 60
 
         self.overrideredirect(True)
@@ -1198,11 +1298,22 @@ class Panel(tk.Toplevel):
             self.ghost_ok = False
             self.db["mode"] = "frosted"
 
+        self.canvas = tk.Canvas(self, bg=KEY, borderwidth=0,
+                                highlightthickness=0)
+        self.content = tk.Frame(self.canvas, bg=KEY)
+        self.content_window = self.canvas.create_window(
+            0, 0, window=self.content, anchor="nw")
+        self.bind("<MouseWheel>", self._on_mousewheel)
+
+        # sits on the Toplevel rather than inside the canvas, so it stays put
+        # while the content slides under it
+        self.scrollbar = tk.Frame(self, bg=CARD_EDGE)
+
         self.font_row = tkfont.Font(font=FONT_ROW)
         self.font_done = tkfont.Font(font=FONT_ROW)
         self.font_done.configure(overstrike=True)
 
-        self.entry = tk.Entry(self, font=FONT_ROW, fg=TEXT, bg=ENTRY_BG,
+        self.entry = tk.Entry(self.content, font=FONT_ROW, fg=TEXT, bg=ENTRY_BG,
                               insertbackground=TEXT, relief="flat",
                               highlightthickness=1,
                               highlightbackground=CARD_EDGE,
@@ -1212,7 +1323,7 @@ class Panel(tk.Toplevel):
 
         # a real Label rather than placeholder text in the Entry, so an empty
         # field is never mistaken for a typed one by commit_entry
-        self.hint = tk.Label(self, text="  add a task…   @fri  @+2w  @10/3",
+        self.hint = tk.Label(self.content, text="  add a task…   @fri  @+2w  @10/3",
                              font=FONT_DIM, fg=TEXT_DONE, bg=ENTRY_BG,
                              anchor="w", cursor="xterm")
         self.hint.bind("<Button-1>", lambda e: self.focus_entry())
@@ -1254,6 +1365,7 @@ class Panel(tk.Toplevel):
 
         tasks = apply_filters(self.db["tasks"], self.db["filters"])
         self.buckets = build_buckets(tasks, self.bar.today, self.db["show_done"])
+        self.bucket_ranges = {}
         keys = [b.key for b in self.buckets]
         if self.db["active"] is not None and self.db["active"] not in keys:
             self.db["active"] = keys[0] if keys else None
@@ -1265,9 +1377,10 @@ class Panel(tk.Toplevel):
             body = BODY_TOP + max(1, len(rows)) * ROW_H + BODY_BOT if expanded else 0
             h = HDR_H + body
 
-            card = tk.Frame(self, bg=bg)
+            card = tk.Frame(self.content, bg=bg)
             card.place(x=PAD, y=y, width=inner, height=h)
             self.cards.append(card)
+            self.bucket_ranges[b.key] = (y, y + h)
             self._header(card, b, inner, h, expanded, bg, ghost)
             if expanded:
                 self._body(card, b, rows, inner, bg, ghost)
@@ -1279,7 +1392,7 @@ class Panel(tk.Toplevel):
         if not self.buckets:
             msg = "no task matches the filter" if self.db["filters"] else \
                   "nothing planned yet"
-            empty = self._label(self, msg, PAD + 2, y, inner, 20,
+            empty = self._label(self.content, msg, PAD + 2, y, inner, 20,
                                 FONT_DIM, TEXT_DIM, bg, ghost)
             self.cards.append(empty)
             bottom = y + 20
@@ -1295,7 +1408,12 @@ class Panel(tk.Toplevel):
         self.sync_hint()
 
         self.attributes("-alpha", 1.0 if ghost else self.db["alpha"])
-        self.win_w, self.win_h = width, total_h
+        self.content_h = total_h
+        self.win_w = width
+        self.content.configure(width=width, height=total_h)
+        self.canvas.itemconfigure(self.content_window, width=width, height=total_h)
+        self.canvas.configure(scrollregion=(0, 0, width, total_h))
+        self._resize_viewport(min(total_h, self.winfo_screenheight() - BAR_H - 2 * BAR_GAP))
 
     def place_near(self, bar_x, bar_y, above):
         if not self.db["panel_open"]:
@@ -1303,10 +1421,63 @@ class Panel(tk.Toplevel):
             return
         self.deiconify()
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        available = bar_y - BAR_GAP if above else sh - bar_y - BAR_H - BAR_GAP
+        self._resize_viewport(min(self.content_h, max(80, available)))
         y = (bar_y - BAR_GAP - self.win_h) if above else (bar_y + BAR_H + BAR_GAP)
         x = max(0, min(bar_x, sw - self.win_w))
         y = max(0, min(y, sh - self.win_h))
         self.geometry("%dx%d+%d+%d" % (self.win_w, self.win_h, x, y))
+
+    def _resize_viewport(self, height):
+        self.win_h = max(1, int(height))
+        self.canvas.place(x=0, y=0, width=self.win_w, height=self.win_h)
+        self._set_scroll(self.scroll_y)
+
+    def _set_scroll(self, offset):
+        """Offset the content by moving the canvas item, not the canvas view.
+
+        yview_moveto clamps against the canvas's *realized* height, which is
+        still the old one until the geometry manager catches up - so the first
+        scroll after a re-render silently did nothing, which is precisely when
+        select() and reveal() ask to bring a card into view. Repositioning the
+        window item is exact and needs no idle pass.
+        """
+        limit = max(0, self.content_h - self.win_h)
+        self.scroll_y = max(0, min(int(offset), limit))
+        self.canvas.coords(self.content_window, 0, -self.scroll_y)
+        self._sync_scrollbar(limit)
+
+    def _sync_scrollbar(self, limit):
+        """Show a thumb only while there is somewhere to scroll to.
+
+        Hidden in ghost mode: a floating bar with no panel behind it would be
+        the one opaque thing left on screen.
+        """
+        if limit <= 0 or self.mode == "ghost":
+            self.scrollbar.place_forget()
+            return
+        track = max(1, self.win_h - 2 * PAD)
+        thumb = max(20, int(track * self.win_h / self.content_h))
+        y = PAD + int((track - thumb) * (self.scroll_y / limit))
+        self.scrollbar.place(x=self.win_w - 5, y=y, width=3, height=thumb)
+        self.scrollbar.lift()
+
+    def _on_mousewheel(self, event):
+        if self.content_h <= self.win_h:
+            return None
+        direction = -1 if event.delta > 0 else 1
+        self._set_scroll(self.scroll_y + direction * ROW_H * 3)
+        return "break"
+
+    def scroll_to_bucket(self, key):
+        span = self.bucket_ranges.get(key)
+        if not span:
+            return
+        top, bottom = span
+        if top < self.scroll_y:
+            self._set_scroll(top)
+        elif bottom > self.scroll_y + self.win_h:
+            self._set_scroll(bottom - self.win_h)
 
     def _label(self, parent, text, x, y, w, h, font, fg, bg, ghost,
                anchor="w"):
@@ -1393,6 +1564,8 @@ class Panel(tk.Toplevel):
         self.db["active"] = None if self.db["active"] == key else key
         self.bar.save()
         self.refresh()
+        if self.db["active"] == key:
+            self.scroll_to_bucket(key)
 
     def cycle(self, tid):
         t = self.find(tid)
@@ -1445,6 +1618,7 @@ class Panel(tk.Toplevel):
     def focus_entry(self):
         if self.mode == "ghost":
             self.bar.toggle_mode()
+        self._set_scroll(self.content_h - self.win_h)
         self.focus_force()               # overrideredirect windows need a shove
         self.entry.focus_set()
 
@@ -1493,6 +1667,7 @@ class Panel(tk.Toplevel):
                     self.db["active"] = b.key
                     self.bar.save()
                     self.refresh()
+                self.scroll_to_bucket(b.key)
                 return
 
 
@@ -1624,7 +1799,14 @@ class Spotlight(tk.Toplevel):
 
 
 def main():
-    Bar(load_state()).mainloop()
+    if not acquire_single_instance():
+        ctypes.windll.user32.MessageBoxW(
+            None, "Overlay Board is already running.", "Overlay Board", 0x40)
+        return
+    try:
+        Bar(load_state()).mainloop()
+    finally:
+        release_single_instance()
 
 
 if __name__ == "__main__":
