@@ -10,7 +10,7 @@ wants the whole screen.
 
 No dependencies. One file, standard-library `tkinter`, Python 3.9+.
 
-![The bar docked on the taskbar with the panel unfolded above it](docs/board.png)
+![The bar on the taskbar with the Board module unfolded above it](docs/board.png)
 
 ## Download
 
@@ -86,11 +86,12 @@ you dropped it and stays there, independent of the bar and of every other
 module. A dot beside the module's name means it is floating. Double-click
 the header, or pick **Dock all modules**, to send it back to the row.
 
-Only the bar is permanent. The modules, the search field and the menus are
-transient — they show while the app has focus and get out of the way the
-moment you click back into whatever you were doing. Clicking the bar brings
-them back. Uncheck **Hide when unfocused** in the bar menu if you would
-rather they stayed put.
+Only the bar is permanent. If you turn on **Hide when unfocused** in the bar
+menu, the modules also get out of the way the moment you click back into
+whatever you were doing, and clicking the bar brings them back. It is off by
+default: Windows makes no promise that clicking an overlay window gives it
+the foreground, and when it does not, auto-hiding pulls a module out from
+under the pointer and reads as the app ignoring you.
 
 Ghost mode is exempt from that, deliberately: reading your tasks while you
 work in another window is the whole point of it, so auto-hiding there would
@@ -125,7 +126,7 @@ Stage lives per task instead: click the glyph to cycle ○ todo → ◐ doing �
 
 ## Ghost mode
 
-![Ghost mode: the panel's background keyed out entirely](docs/ghost.png)
+![Ghost mode: every background keyed out, text floating over the desktop](docs/ghost.png)
 
 Two display modes, F2 or the bar menu:
 
@@ -150,9 +151,9 @@ lists live matches as you type.
 - **Clicking a result** jumps straight to the card that task lives in.
 
 Filters stack and narrow with AND. A filter narrows the *whole board*, not
-just the view — the counts, the meter, and the splitting rule all run on the
-filtered set, so filtering a split month back under the cap collapses it into
-one card again.
+just the view — the counts, the Stats module and the splitting rule all run
+on the filtered set, so filtering a split month back under the cap collapses
+it into one card again.
 
 ## Adding tasks
 
