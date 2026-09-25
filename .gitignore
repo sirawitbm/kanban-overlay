@@ -1,0 +1,10 @@
+# personal board contents - this is your data, not the app
+OverlayBoard.json
+OverlayBoard.json.bak
+OverlayBoard.json.tmp
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
