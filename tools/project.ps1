@@ -18,7 +18,7 @@ $ProjectExeName   = "KanbanOverlay"
 
 # Shown in the EXE's file properties and the installer's publisher field.
 # Change it here only - both consumers read this one value.
-$ProjectPublisher = "Sirawit Butmaratthaya"
+$ProjectPublisher = "sirawitbm"
 $ProjectUrl       = "https://github.com/sirawitbm/kanban-overlay"
 
 function New-VersionInfoFile {
