@@ -50,10 +50,19 @@ overwrite an existing board unless you pass `--force`, and keeps a `.bak`.
 
 **The bar** is the always-visible strip. On first run it finds your real
 taskbar via `SPI_GETWORKAREA` and parks itself on it, but you can drag it
-anywhere and it remembers. It shows the open count, the overdue count, a
-progress meter, and the next thing due — in red if that next thing is
-already late. It stays near-solid whatever else you set, because it is the
-one thing always guaranteed clickable.
+anywhere and it remembers. It carries the module buttons and two numbers —
+**due today** and **overdue** — and deliberately nothing else: it shares the
+taskbar, so every extra field costs length that has to come from somewhere.
+Hover any button and it tells you what it opens. It stays near-solid
+whatever else you set, because it is the one thing always guaranteed
+clickable.
+
+There is a **tray icon** as well. Left-click brings the app back, right-click
+gives a short menu, and you can quit from there. **Hide to tray** puts the
+bar and every module away and leaves only the icon. Windows 11 files new
+tray icons under the overflow arrow (`^`) by default — drag it out, or turn
+it on under Settings → Personalization → Taskbar → Other system tray icons,
+to keep it visible.
 
 ![Three modules docked in a row above the bar](docs/modules.png)
 

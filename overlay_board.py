@@ -13,10 +13,11 @@ Deps:   none - standard library tkinter only.
 The app is a bar plus a set of modules:
 
   the bar    - a slim strip, sized to sit over the Windows taskbar (it docks
-               there on first run) but draggable anywhere. It is the
-               dashboard: open count, overdue count, a progress meter, and
-               the next thing due. Always solid, always clickable. The
-               buttons on its left summon the modules.
+               there on first run) but draggable anywhere. It carries the
+               module buttons and two numbers - due today, and overdue -
+               and nothing else, because every field costs length on a strip
+               that has to share the taskbar. Always solid, always clickable.
+               Hovering a button says what it opens.
   board      - the post-it stack of time buckets, plus the task input
   today      - overdue, today and tomorrow, and nothing else
   stats      - open/late/done at a glance, and the next seven days
@@ -26,6 +27,11 @@ the bar and following it around - and the moment you drag its header it
 detaches, floats wherever you dropped it, and stays there. Double-click the
 header, or use "Dock all modules", to send it back. A dot beside a module's
 name means it is floating.
+
+There is a tray icon too. Left-click it to bring the app back, right-click
+for a short menu, and quit from there. "Hide to tray" puts everything away
+and leaves only the icon. It is drawn with Shell_NotifyIcon directly rather
+than pystray, to keep the dependency count at zero.
 
 Only the bar is permanent. The modules, the search field and the menus are
 transient: they appear while the app has focus and get out of the way the
@@ -142,11 +148,10 @@ BAR_ALPHA = 0.97                    # the bar ignores the panel opacity setting
 
 # -- geometry, px -----------------------------------------------------------
 BAR_H = 34                          # tuned to sit inside a default taskbar
-BAR_MIN_W = 400
+BAR_MIN_W = 300
 BAR_PAD = 9
 BAR_GAP = 6                         # bar to panel
 ICON_W = 26
-METER_W = 52
 METER_H = 5
 CHIP_H = 20
 SEP_W = 13                          # gap that carries a divider line
@@ -154,7 +159,9 @@ SPOT_W = 620                        # the centred search field
 SPOT_PAD = 18
 SPOT_ROW = 26
 SPOT_MAX = 5                        # live matches listed under the input
-FOCUS_POLL_MS = 250                 # how often the pin and focus are re-checked
+FOCUS_POLL_MS = 250                 # how often focus is re-checked
+PIN_EVERY = 8                       # re-assert topmost every Nth focus poll
+TIP_DELAY_MS = 450                  # hover dwell before a tooltip appears
 
 PAD = 10                            # window margin around the card stack
 TOP_H = 8                           # panel margin above the stack
@@ -658,6 +665,8 @@ def summarise(tasks, today):
         "done": done,
         "open": open_n,
         "late": late,
+        "today": sum(1 for t in tasks if t["status"] != "done"
+                     and to_date(t.get("due")) == today),
         "next": upcoming[0] if upcoming else None,
         "frac": (done / total) if total else 0.0,
     }
@@ -791,13 +800,35 @@ def release_single_instance():
 # shared widget helpers
 # ---------------------------------------------------------------------------
 
-def clip(text, px, fnt):
-    """Trim text to a pixel budget, with an ellipsis if anything was lost."""
-    if fnt.measure(text) <= px:
-        return text
-    while text and fnt.measure(text + "…") > px:
-        text = text[:-1]
-    return text + "…"
+class Tooltip(tk.Toplevel):
+    """A small label that says what a bar icon will do.
+
+    The bar is nothing but icons, so without this the only way to learn what
+    a button opens is to press it.
+    """
+
+    def __init__(self, bar, text, anchor):
+        super().__init__(bar)
+        self.overrideredirect(True)
+        self.withdraw()                  # placed before shown, as with menus
+        self.attributes("-topmost", True)
+        self.attributes("-alpha", 0.96)
+        self.configure(bg=MENU_EDGE)
+        lbl = tk.Label(self, text=text, font=FONT_DIM, fg=TEXT, bg=MENU_BG,
+                       padx=8, pady=3)
+        lbl.pack(padx=1, pady=1)
+        self.update_idletasks()
+
+        w, h = self.winfo_reqwidth(), self.winfo_reqheight()
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        x = anchor.winfo_rootx() + (anchor.winfo_width() - w) // 2
+        y = anchor.winfo_rooty() - h - 6
+        if y < 0:                        # bar docked at the top of the screen
+            y = anchor.winfo_rooty() + anchor.winfo_height() + 6
+        self.geometry("%dx%d+%d+%d" % (w, h, max(2, min(x, sw - w - 2)),
+                                       max(2, min(y, sh - h - 2))))
+        self.deiconify()
+        pin_topmost(self)
 
 
 class Scrim(tk.Toplevel):
@@ -834,11 +865,14 @@ class PopMenu(tk.Toplevel):
         super().__init__(app)
         self.app = app
         self.overrideredirect(True)
+        # stay unmapped until placed: an overrideredirect window that maps
+        # before its geometry is set comes up at 0,0, and pin_topmost then
+        # nails it there, because SWP_NOMOVE means "keep where you are"
+        self.withdraw()
         self.attributes("-topmost", True)
         self.configure(bg=MENU_EDGE)          # the 1px border is this showing
 
         self.scrim = Scrim(app, self.close)
-        self.lift()
 
         body = tk.Frame(self, bg=MENU_BG)
         w = MENU_W
@@ -858,6 +892,10 @@ class PopMenu(tk.Toplevel):
 
         body.place(x=1, y=1, width=w, height=yy)
         self._open(x, y, w + 2, yy + 2)
+        self.deiconify()                 # only now does it appear, in place
+        self.lift()
+        pin_topmost(self.scrim)          # order matters: scrim first, then
+        pin_topmost(self)                # the menu, so clicks reach the menu
         self.bind("<Escape>", lambda e: self.close())
         self.focus_force()
 
@@ -972,6 +1010,7 @@ class Module(tk.Toplevel):
     key = "module"
     label = "Module"
     icon = "board"
+    blurb = ""
     default_w = 260
 
     def __init__(self, bar):
@@ -1265,6 +1304,7 @@ class BoardModule(Module):
     key = "board"
     label = "Board"
     icon = "board"
+    blurb = "Board — every task, grouped by when"
 
     def width(self):
         return int(self.db["width"])
@@ -1522,6 +1562,7 @@ class TodayModule(Module):
     key = "today"
     label = "Today"
     icon = "today"
+    blurb = "Today — overdue, today and tomorrow"
     default_w = 250
 
     def fill_content(self, bg, ghost):
@@ -1581,6 +1622,7 @@ class StatsModule(Module):
     key = "stats"
     label = "Stats"
     icon = "stats"
+    blurb = "Stats — progress and the next seven days"
     default_w = 232
 
     def fill_content(self, bg, ghost):
@@ -1653,6 +1695,222 @@ class StatsModule(Module):
 
 
 # ---------------------------------------------------------------------------
+# notification area
+# ---------------------------------------------------------------------------
+
+WM_APP = 0x8000
+TRAY_CALLBACK = WM_APP + 1
+NIM_ADD, NIM_DELETE = 0, 2
+NIF_MESSAGE, NIF_ICON, NIF_TIP = 0x01, 0x02, 0x04
+WM_LBUTTONUP, WM_LBUTTONDBLCLK, WM_RBUTTONUP = 0x0202, 0x0203, 0x0205
+IMAGE_ICON = 1
+LR_LOADFROMFILE, LR_DEFAULTSIZE = 0x0010, 0x0040
+WS_EX_TOOLWINDOW = 0x00000080
+PM_REMOVE = 1
+TRAY_PUMP_MS = 120
+
+if os.name == "nt":
+    WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, wintypes.HWND,
+                                 wintypes.UINT, wintypes.WPARAM,
+                                 wintypes.LPARAM)
+
+    # Without argtypes ctypes guesses a 32-bit int for the handed-back LPARAM
+    # and raises on anything larger, which on a 64-bit build is most messages.
+    _DEF_WNDPROC = ctypes.windll.user32.DefWindowProcW
+    _DEF_WNDPROC.argtypes = (wintypes.HWND, wintypes.UINT, wintypes.WPARAM,
+                             wintypes.LPARAM)
+    _DEF_WNDPROC.restype = ctypes.c_ssize_t
+
+    class WNDCLASSW(ctypes.Structure):
+        _fields_ = [("style", wintypes.UINT),
+                    ("lpfnWndProc", WNDPROC),
+                    ("cbClsExtra", ctypes.c_int),
+                    ("cbWndExtra", ctypes.c_int),
+                    ("hInstance", wintypes.HINSTANCE),
+                    ("hIcon", wintypes.HICON),
+                    ("hCursor", wintypes.HANDLE),
+                    ("hbrBackground", wintypes.HBRUSH),
+                    ("lpszMenuName", wintypes.LPCWSTR),
+                    ("lpszClassName", wintypes.LPCWSTR)]
+
+    class NOTIFYICONDATAW(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD),
+                    ("hWnd", wintypes.HWND),
+                    ("uID", wintypes.UINT),
+                    ("uFlags", wintypes.UINT),
+                    ("uCallbackMessage", wintypes.UINT),
+                    ("hIcon", wintypes.HICON),
+                    ("szTip", wintypes.WCHAR * 128),
+                    ("dwState", wintypes.DWORD),
+                    ("dwStateMask", wintypes.DWORD),
+                    ("szInfo", wintypes.WCHAR * 256),
+                    ("uVersion", wintypes.UINT),
+                    ("szInfoTitle", wintypes.WCHAR * 64),
+                    ("dwInfoFlags", wintypes.DWORD),
+                    ("guidItem", ctypes.c_byte * 16),
+                    ("hBalloonIcon", wintypes.HICON)]
+
+
+class TrayIcon:
+    """A notification-area icon, from Shell_NotifyIcon and a hidden window.
+
+    Not pystray: installing nothing is the point of this app, and the tray is
+    a page of ctypes against two dependencies and a heavier build. Tk owns
+    the main loop, so rather than a blocking GetMessage pump, the hidden
+    window's queue is drained from a Tk timer, and the callbacks hand work
+    back to Tk with after_idle instead of touching widgets inside a WndProc.
+
+    Every failure here is non-fatal. A missing tray is a missing convenience;
+    it must never stop the app from starting.
+    """
+
+    CLASS_NAME = "OverlayBoardTrayWindow"
+
+    MAX_TRIES = 5
+
+    def __init__(self, bar):
+        self.bar = bar
+        self.hwnd = None
+        self.nid = None
+        self.ok = False
+        self._tries = 0
+        self._taskbar_created = 0
+        if os.name != "nt":
+            return
+        try:
+            self._create()
+        except Exception as exc:                  # noqa: BLE001 - never fatal
+            print("tray window unavailable:", exc, file=sys.stderr)
+            self.remove()
+            return
+        self._add_icon()
+        self.bar.after(TRAY_PUMP_MS, self._pump)
+
+    def _add_icon(self):
+        """Ask the shell for a slot, retrying: it can refuse while busy."""
+        try:
+            if self._shell_add():
+                self.ok = True
+                self._tries = 0
+                return
+        except Exception as exc:                  # noqa: BLE001
+            print("tray icon error:", exc, file=sys.stderr)
+        self._tries += 1
+        if self._tries < self.MAX_TRIES:
+            self.bar.after(1500, self._add_icon)
+        else:
+            print("gave up on the tray icon after %d tries" % self._tries,
+                  file=sys.stderr)
+
+    # -- setup --------------------------------------------------------------
+
+    def _load_icon(self):
+        user32 = ctypes.windll.user32
+        user32.LoadIconW.argtypes = (wintypes.HINSTANCE, wintypes.LPCWSTR)
+        user32.LoadIconW.restype = wintypes.HICON
+        # a packaged build carries the icon as resource 1 of the exe itself
+        inst = ctypes.windll.kernel32.GetModuleHandleW(None)
+        icon = user32.LoadIconW(inst, ctypes.cast(ctypes.c_void_p(1),
+                                                  wintypes.LPCWSTR))
+        if icon:
+            return icon
+        for path in (APP_DIR / "OverlayBoard.ico",
+                     HERE / "assets" / "OverlayBoard.ico"):
+            if path.exists():
+                user32.LoadImageW.restype = wintypes.HANDLE
+                icon = user32.LoadImageW(None, str(path), IMAGE_ICON, 0, 0,
+                                         LR_LOADFROMFILE | LR_DEFAULTSIZE)
+                if icon:
+                    return icon
+        return None
+
+    def _create(self):
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+
+        # the callback must outlive the window, or Python frees it and the
+        # first tray click jumps into reclaimed memory
+        self._proc = WNDPROC(self._wndproc)
+        self._cls = WNDCLASSW()
+        self._cls.lpfnWndProc = self._proc
+        self._cls.hInstance = kernel32.GetModuleHandleW(None)
+        self._cls.lpszClassName = self.CLASS_NAME
+        user32.RegisterClassW(ctypes.byref(self._cls))
+
+        user32.CreateWindowExW.restype = wintypes.HWND
+        self.hwnd = user32.CreateWindowExW(
+            WS_EX_TOOLWINDOW, self.CLASS_NAME, "Overlay Board", 0,
+            0, 0, 0, 0, None, None, self._cls.hInstance, None)
+        if not self.hwnd:
+            raise OSError("could not create the tray window")
+
+        # Explorer broadcasts this when it restarts, having dropped every
+        # tray icon on the way down; re-adding is the only way back
+        self._taskbar_created = user32.RegisterWindowMessageW("TaskbarCreated")
+
+    def _shell_add(self):
+        icon = self._load_icon()
+        nid = NOTIFYICONDATAW()
+        nid.cbSize = ctypes.sizeof(NOTIFYICONDATAW)
+        nid.hWnd = self.hwnd
+        nid.uID = 1
+        nid.uFlags = NIF_MESSAGE | NIF_TIP | (NIF_ICON if icon else 0)
+        nid.uCallbackMessage = TRAY_CALLBACK
+        nid.hIcon = icon or 0
+        nid.szTip = "Overlay Board"
+        if not ctypes.windll.shell32.Shell_NotifyIconW(NIM_ADD,
+                                                       ctypes.byref(nid)):
+            return False
+        self.nid = nid
+        return True
+
+    # -- message handling ---------------------------------------------------
+
+    def _wndproc(self, hwnd, msg, wparam, lparam):
+        if self._taskbar_created and msg == self._taskbar_created:
+            self.nid = None
+            self._tries = 0
+            self.bar.after_idle(self._add_icon)
+            return 0
+        if msg == TRAY_CALLBACK:
+            event = lparam & 0xFFFF
+            if event in (WM_LBUTTONUP, WM_LBUTTONDBLCLK):
+                self.bar.after_idle(self.bar.tray_click)
+            elif event == WM_RBUTTONUP:
+                self.bar.after_idle(self.bar.tray_menu)
+            return 0
+        return _DEF_WNDPROC(hwnd, msg, wparam, lparam)
+
+    def _pump(self):
+        """Drain the hidden window's queue; Tk's loop will not do it for us."""
+        if not self.hwnd:
+            return
+        try:
+            user32 = ctypes.windll.user32
+            msg = wintypes.MSG()
+            while user32.PeekMessageW(ctypes.byref(msg), self.hwnd,
+                                      0, 0, PM_REMOVE):
+                user32.TranslateMessage(ctypes.byref(msg))
+                user32.DispatchMessageW(ctypes.byref(msg))
+        except Exception:                          # noqa: BLE001
+            pass
+        self.bar.after(TRAY_PUMP_MS, self._pump)
+
+    def remove(self):
+        try:
+            if self.nid is not None:
+                ctypes.windll.shell32.Shell_NotifyIconW(NIM_DELETE,
+                                                        ctypes.byref(self.nid))
+                self.nid = None
+            if self.hwnd:
+                ctypes.windll.user32.DestroyWindow(self.hwnd)
+                self.hwnd = None
+        except Exception:                          # noqa: BLE001
+            pass
+        self.ok = False
+
+
+# ---------------------------------------------------------------------------
 # the bar
 # ---------------------------------------------------------------------------
 
@@ -1677,6 +1935,10 @@ class Bar(tk.Tk):
         self.pop = None
         self.undo = []
         self.active = True
+        self._pin_tick = 0
+        self.hidden = False
+        self.tip = None
+        self._tip_job = None
         self.bar_w = BAR_MIN_W
 
         self.overrideredirect(True)
@@ -1708,6 +1970,8 @@ class Bar(tk.Tk):
         self.bind_all("<Control-z>", lambda e: self.undo_last())
         self.bind_all("<Control-q>", lambda e: self.quit_app())
 
+        self.tray = TrayIcon(self)
+
         self.refresh()
         self.after(60000, self._tick)
         self.after(FOCUS_POLL_MS, self._watch_focus)
@@ -1727,21 +1991,36 @@ class Bar(tk.Tk):
             return False
         return True
 
+    def overlay_open(self):
+        return ((self.pop is not None and self.pop.winfo_exists())
+                or (self.spot is not None and self.spot.winfo_exists()))
+
+    def close_overlays(self):
+        # a menu or the search field left open behind us is clutter
+        if self.pop is not None and self.pop.winfo_exists():
+            self.pop.close()
+        if self.spot is not None and self.spot.winfo_exists():
+            self.spot.close()
+
     def _watch_focus(self):
         active = foreground_is_ours()
         if active != self.active:
             self.active = active
             if not active:
-                # a menu or the search field left open behind us is clutter
-                if self.pop is not None and self.pop.winfo_exists():
-                    self.pop.close()
-                if self.spot is not None and self.spot.winfo_exists():
-                    self.spot.close()
+                self.close_overlays()
             self.place_windows()
-        pin_topmost(self)
-        for m in self.modules:
-            if m.winfo_ismapped():
-                pin_topmost(m)
+
+        # Re-pinning re-inserts a window at the top of the topmost band, so
+        # doing it while a menu is up buries the menu behind the modules and
+        # eats the click meant for it. Menus are short-lived: leave the order
+        # alone until one closes. Every couple of seconds is also plenty -
+        # at the focus-poll rate the constant reordering visibly flickered.
+        self._pin_tick += 1
+        if not self.overlay_open() and self._pin_tick % PIN_EVERY == 0:
+            pin_topmost(self)
+            for m in self.modules:
+                if m.winfo_ismapped():
+                    pin_topmost(m)
         self.after(FOCUS_POLL_MS, self._watch_focus)
 
     def activate(self, *_):
@@ -1782,16 +2061,45 @@ class Bar(tk.Tk):
         w.bind("<B1-Motion>", self._move)
         w.bind("<ButtonRelease-1>", self._release)
 
-    def _icon(self, key, x, cmd, fg=TEXT_DIM, size=10):
+    def _icon(self, key, x, cmd, fg=TEXT_DIM, size=10, tip=None):
         lbl = tk.Label(self, text=self.icons[key], font=(self.icon_family, size),
                        fg=fg, bg=BAR_BG, cursor="hand2")
         lbl.place(x=x, y=0, width=ICON_W, height=BAR_H)
-        lbl.bind("<Button-1>", lambda e, w=lbl: (self.activate(), cmd(w)))
-        lbl.bind("<Button-3>", self.menu_event)
-        lbl.bind("<Enter>", lambda e: lbl.configure(bg=HOVER_BG, fg=TEXT))
-        lbl.bind("<Leave>", lambda e: lbl.configure(bg=BAR_BG, fg=fg))
+        lbl.bind("<Button-1>",
+                 lambda e, w=lbl: (self.hide_tip(), self.activate(), cmd(w)))
+        lbl.bind("<Button-3>", lambda e: (self.hide_tip(), self.menu_event(e)))
+        lbl.bind("<Enter>", lambda e, w=lbl: (w.configure(bg=HOVER_BG, fg=TEXT),
+                                              self.arm_tip(w, tip)))
+        lbl.bind("<Leave>", lambda e, w=lbl: (w.configure(bg=BAR_BG, fg=fg),
+                                              self.hide_tip()))
         self.widgets.append(lbl)
         return lbl
+
+    # -- tooltips -----------------------------------------------------------
+
+    def arm_tip(self, widget, text):
+        """Wait a beat before showing, so sweeping across the bar is quiet."""
+        self.hide_tip()
+        if text:
+            self._tip_job = self.after(
+                TIP_DELAY_MS, lambda: self._show_tip(widget, text))
+
+    def _show_tip(self, widget, text):
+        self._tip_job = None
+        if not widget.winfo_exists():
+            return
+        self.tip = Tooltip(self, text, widget)
+
+    def hide_tip(self, *_):
+        if self._tip_job is not None:
+            self.after_cancel(self._tip_job)
+            self._tip_job = None
+        if self.tip is not None:
+            try:
+                self.tip.destroy()
+            except tk.TclError:
+                pass
+            self.tip = None
 
     def _text(self, text, x, w, font, fg):
         lbl = tk.Label(self, text=text, font=font, fg=fg, bg=BAR_BG, anchor="w")
@@ -1805,16 +2113,6 @@ class Bar(tk.Tk):
         f = tk.Frame(self, bg=BAR_EDGE)
         f.place(x=x + SEP_W // 2, y=10, width=1, height=BAR_H - 20)
         self.widgets.append(f)
-
-    def _meter(self, x, frac, accent):
-        y = (BAR_H - METER_H) // 2
-        back = tk.Frame(self, bg=METER_BG)
-        back.place(x=x, y=y, width=METER_W, height=METER_H)
-        fill = int(round(METER_W * max(0.0, min(1.0, frac))))
-        if fill:
-            tk.Frame(back, bg=accent).place(x=0, y=0, width=fill, height=METER_H)
-        self._draggable(back)
-        self.widgets.append(back)
 
     def _chip(self, text, x, w):
         """A filter block hanging off the bar, with its own discard button."""
@@ -1836,7 +2134,9 @@ class Bar(tk.Tk):
         """Lit when the module is on screen, with a dot when it floats free."""
         on = m.is_open
         fg = ACCENTS[2] if on else TEXT_DIM
-        self._icon(m.icon, x, lambda w, k=m.key: self.toggle_module(k), fg=fg)
+        verb = "Hide" if on else "Show"
+        self._icon(m.icon, x, lambda w, k=m.key: self.toggle_module(k),
+                   fg=fg, tip="%s %s" % (verb, m.blurb))
         if on:
             dot_w = 10 if m.floating else ICON_W - 10
             marker = tk.Frame(self, bg=ACCENTS[2] if not m.floating
@@ -1856,33 +2156,20 @@ class Bar(tk.Tk):
         s = summarise(tasks, self.today)
         filters = self.db["filters"]
 
-        open_txt = "%d open" % s["open"] if s["open"] else "all clear"
+        # deliberately just two numbers: what is due now and what is overdue.
+        # The bar sits on the taskbar, so every extra field costs length that
+        # has to come out of somewhere else on screen.
+        today_txt = "%d today" % s["today"]
         late_txt = "%d late" % s["late"] if s["late"] else ""
-        next_fg = TEXT_DIM
-        if s["next"]:
-            d, t = s["next"]
-            when = "today" if d == self.today else fmt_short(d)
-            next_txt = "%s   %s" % (clip(t["text"], 140, self.m_bar), when)
-            # the soonest open task can already be in the past; say so
-            if d < self.today:
-                next_fg = ACCENT_OVERDUE
-            elif d == self.today:
-                next_fg = TEXT
-        elif filters:
-            next_txt = "no match" if not s["total"] else "nothing scheduled"
-        else:
-            next_txt = "nothing scheduled" if s["total"] else "nothing planned"
 
-        open_w = self.m_barb.measure(open_txt) + 12
-        late_w = (self.m_barb.measure(late_txt) + 12) if late_txt else 0
-        next_w = self.m_bar.measure(next_txt) + 8
+        today_w = self.m_barb.measure(today_txt) + 14
+        late_w = (self.m_barb.measure(late_txt) + 14) if late_txt else 0
         chip_ws = [self.m_chip.measure(f) + 32 for f in filters]
         buttons_w = ICON_W * len(self.modules)
 
-        left_w = (BAR_PAD + buttons_w + SEP_W + open_w + late_w + SEP_W
-                  + METER_W + SEP_W + next_w)
+        left_w = BAR_PAD + buttons_w + SEP_W + today_w + late_w
         right_w = (ICON_W + sum(w + 5 for w in chip_ws) + ICON_W + BAR_PAD)
-        self.bar_w = max(BAR_MIN_W, left_w + 22 + right_w)
+        self.bar_w = max(BAR_MIN_W, left_w + 18 + right_w)
 
         x = BAR_PAD
         for m in self.modules:
@@ -1891,30 +2178,22 @@ class Bar(tk.Tk):
         self._sep(x)
         x += SEP_W
 
-        self._text(open_txt, x, open_w, FONT_BAR_B,
-                   TEXT if s["open"] else ACCENTS[1])
-        x += open_w
+        self._text(today_txt, x, today_w, FONT_BAR_B,
+                   TEXT if s["today"] else TEXT_DIM)
+        x += today_w
         if late_txt:
             self._text(late_txt, x, late_w, FONT_BAR_B, ACCENT_OVERDUE)
-            x += late_w
-
-        self._sep(x)
-        x += SEP_W
-        self._meter(x, s["frac"], ACCENTS[1] if s["frac"] >= 1.0 else ACCENTS[2])
-        x += METER_W
-        self._sep(x)
-        x += SEP_W
-        self._text(next_txt, x, next_w, FONT_BAR, next_fg)
 
         # right edge, laid out backwards so the chips grow the bar leftwards
         rx = self.bar_w - BAR_PAD - ICON_W
-        self._icon("more", rx, self.open_menu)
+        self._icon("more", rx, self.open_menu, tip="Menu")
         for f, w in zip(reversed(filters), reversed(chip_ws)):
             rx -= w + 5
             self._chip(f, rx, w)
         rx -= ICON_W
         self._icon("search", rx, self.open_search,
-                   fg=CHIP_FG if filters else TEXT_DIM)
+                   fg=CHIP_FG if filters else TEXT_DIM,
+                   tip="Search tasks  (Ctrl+F)")
 
     # -- placement ----------------------------------------------------------
 
@@ -1932,6 +2211,12 @@ class Bar(tk.Tk):
         return int(pos[1]) > self.winfo_screenheight() // 2
 
     def place_windows(self):
+        if self.hidden:
+            self.withdraw()
+            for m in self.modules:
+                m.withdraw()
+            return
+        self.deiconify()
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
         if not self.db["pos"]:
             self.db["pos"] = list(self._default_pos())
@@ -2108,9 +2393,46 @@ class Bar(tk.Tk):
         self.save()
         self.refresh()
 
+    def set_hidden(self, hidden):
+        self.hidden = bool(hidden)
+        if not self.hidden:
+            self.active = True
+        self.refresh()
+
+    def tray_click(self):
+        """Left click: bring everything back, or just re-focus it."""
+        if self.hidden:
+            self.set_hidden(False)
+        else:
+            self.activate()
+
+    def tray_menu(self):
+        self.active = True
+        try:
+            self.focus_force()
+        except tk.TclError:
+            pass
+        x, y = self.winfo_pointerx(), self.winfo_pointery()
+        items = [
+            {"label": "Show Overlay Board" if self.hidden else "Hide from screen",
+             "cmd": lambda: self.set_hidden(not self.hidden)},
+            {"kind": "sep"},
+        ]
+        if not self.hidden:
+            for m in self.modules:
+                items.append({"label": m.label, "checked": m.is_open,
+                              "cmd": (lambda k=m.key: self.toggle_module(k))})
+            items.append({"label": "Reset positions", "cmd": self.reset_position})
+            items.append({"kind": "sep"})
+        items.append({"label": "Quit", "accel": "Ctrl+Q", "danger": True,
+                      "cmd": self.quit_app})
+        self.popup(x, y, items)
+
     def quit_app(self, *_):
         self.save()
-        self.destroy()
+        if getattr(self, "tray", None) is not None:
+            self.tray.remove()          # otherwise a dead icon lingers in the
+        self.destroy()                  # tray until something hovers over it
 
     # -- menus --------------------------------------------------------------
 
@@ -2156,7 +2478,7 @@ class Bar(tk.Tk):
             {"kind": "choice", "label": "Opacity",
              "options": [("%d" % round(a * 100), a) for a in ALPHAS],
              "value": self.db["alpha"], "cmd": self.set_alpha},
-            {"kind": "choice", "label": "Board",
+            {"kind": "choice", "label": "Width",
              "options": [(str(w), w) for w in WIDTHS],
              "value": self.db["width"], "cmd": self.set_width},
             {"kind": "sep"},
@@ -2166,6 +2488,9 @@ class Bar(tk.Tk):
                           "cmd": self.clear_filters})
         items += [
             {"label": "Reset positions", "cmd": self.reset_position},
+            {"label": "Hide to tray", "enabled": bool(getattr(self, "tray", None)
+                                                      and self.tray.ok),
+             "cmd": lambda: self.set_hidden(True)},
             {"label": "Undo delete", "accel": "Ctrl+Z",
              "enabled": bool(self.undo), "cmd": self.undo_last},
             {"label": "Clear completed", "cmd": self.clear_completed},
@@ -2244,6 +2569,7 @@ class Spotlight(tk.Toplevel):
     def raise_it(self):
         self.deiconify()
         self.lift()
+        pin_topmost(self)
         self.focus_force()
         self.entry.focus_set()
 

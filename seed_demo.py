@@ -9,7 +9,8 @@ the bucketing rule:
 
   this month   regular - exactly MAX_PER_CARD open, so it sits as one card
                          right on the boundary, plus two completed ones to
-                         show that finished work does not force a split
+                         show that finished work does not force a split. Two
+                         of them fall today, so the bar's counter is not 0
   next month   busy    - thirteen open tasks, so the month splits into weeks,
                          and one of those weeks holds six, so that week
                          splits again into days
@@ -73,9 +74,9 @@ def build(today=None):
     def soon(n):
         return min(today + timedelta(days=n), end)
 
-    add("Grocery run", soon(1))
+    add("Grocery run", today)
+    add("Water the plants", today)
     add("Call the landlord about the boiler", soon(2))
-    add("Water the plants", soon(3))
     add("Swap the winter clothes in", soon(6))
     add("Sunday meal prep", soon(6))
     add("Pick up the dry cleaning", today - timedelta(days=3), "done")
