@@ -58,6 +58,22 @@ one thing always guaranteed clickable.
 **The panel** is the post-it stack. It unfolds above the bar (or below, if
 you drag the bar to the top half of the screen) and tucks away again.
 
+Only the bar is permanent. The panel, the search field and the menus are
+transient — they show while the app has focus and get out of the way the
+moment you click back into whatever you were doing. Clicking the bar brings
+them back. Uncheck **Hide panel when unfocused** in the bar menu if you would
+rather the panel stayed put.
+
+Ghost mode is exempt from that, deliberately: reading your tasks while you
+work in another window is the whole point of it, so auto-hiding there would
+leave the mode with nothing to do.
+
+Always-on-top is re-asserted on a timer rather than set once, because Tk
+applies `WS_EX_TOPMOST` at window creation and never again — anything that
+goes topmost afterwards otherwise ends up above the bar and stays there.
+Exclusive-fullscreen games still cover everything; nothing short of an
+overlay hook changes that.
+
 ## Sections are time, not stages
 
 Most boards ask you to sort work into To Do / Doing / Done columns. This one

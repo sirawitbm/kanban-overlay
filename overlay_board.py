@@ -12,12 +12,24 @@ Deps:   none - standard library tkinter only.
 
 The app is two pieces:
 
-  the bar    - a slim always-on-top strip, sized to sit over the Windows
-               taskbar (it docks there on first run) but draggable anywhere.
-               It is the dashboard: open count, overdue count, a progress
-               meter, and the next thing due. Always solid, always clickable.
+  the bar    - a slim strip, sized to sit over the Windows taskbar (it docks
+               there on first run) but draggable anywhere. It is the
+               dashboard: open count, overdue count, a progress meter, and
+               the next thing due. Always solid, always clickable.
   the panel  - the post-it stack, which unfolds above or below the bar when
                you click the chevron, and tucks away again.
+
+Only the bar is permanent. The panel, the search field and the menus are
+transient: they appear while the app has focus and get out of the way the
+moment you click back into whatever you were doing. Clicking the bar brings
+them back. Turn that off with "Hide panel when unfocused" in the bar menu.
+
+Ghost mode is exempt from the auto-hide, since reading your tasks while you
+work in another window is the entire point of it.
+
+Always-on-top is re-asserted on a timer rather than set once. Tk applies
+WS_EX_TOPMOST when a window is created and never again, so anything that
+goes topmost later simply ends up above you and stays there.
 
 The panel has two display modes, toggled from the bar menu or with F2:
 
@@ -134,6 +146,7 @@ SPOT_W = 620                        # the centred search field
 SPOT_PAD = 18
 SPOT_ROW = 26
 SPOT_MAX = 5                        # live matches listed under the input
+FOCUS_POLL_MS = 250                 # how often the pin and focus are re-checked
 
 PAD = 10                            # window margin around the card stack
 TOP_H = 8                           # panel margin above the stack
@@ -212,6 +225,7 @@ DEFAULTS = {
     "active": None,
     "filters": [],
     "panel_open": True,
+    "auto_hide": True,              # panel only while the app has focus
 }
 
 
@@ -267,6 +281,7 @@ def load_state():
     db["filters"] = [str(f) for f in raw_filters if str(f).strip()]
     db["show_done"] = db["show_done"] if isinstance(db["show_done"], bool) else True
     db["panel_open"] = db["panel_open"] if isinstance(db["panel_open"], bool) else True
+    db["auto_hide"] = db["auto_hide"] if isinstance(db["auto_hide"], bool) else True
     if db["active"] is not None and not isinstance(db["active"], str):
         db["active"] = None
 
@@ -626,6 +641,68 @@ def work_area():
 _INSTANCE_HANDLE = None
 
 
+GA_ROOT = 2
+HWND_TOPMOST = -1
+SWP_NOSIZE = 0x0001
+SWP_NOMOVE = 0x0002
+SWP_NOACTIVATE = 0x0010
+
+
+def _hwnd(widget):
+    """The real top-level window handle behind a Tk widget."""
+    handle = widget.winfo_id()
+    if os.name != "nt":
+        return handle
+    try:
+        return ctypes.windll.user32.GetAncestor(handle, GA_ROOT) or handle
+    except (AttributeError, OSError):
+        return handle
+
+
+def pin_topmost(widget):
+    """Re-assert always-on-top without stealing focus.
+
+    Tk's -topmost only sets WS_EX_TOPMOST when the window is created. Any
+    window that goes topmost afterwards - another overlay, a notification,
+    the shell rearranging itself - simply ends up above it and stays there.
+    Nothing tells us when that happens, so the pin is re-applied on a timer.
+    SWP_NOACTIVATE keeps it from pulling focus off whatever you are typing in.
+    """
+    if os.name != "nt":
+        return
+    try:
+        user32 = ctypes.windll.user32
+        user32.SetWindowPos.argtypes = (
+            wintypes.HWND, ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
+            ctypes.c_int, ctypes.c_int, wintypes.UINT)
+        user32.SetWindowPos(_hwnd(widget), ctypes.c_void_p(HWND_TOPMOST),
+                            0, 0, 0, 0,
+                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+    except (AttributeError, OSError, tk.TclError):
+        pass
+
+
+def foreground_is_ours():
+    """True when the focused window belongs to this process.
+
+    Asked of Windows rather than of Tk: these windows are overrideredirect,
+    so Tk's own focus events are unreliable, and this one question covers
+    every window we own - bar, panel, search, menus - without tracking each.
+    """
+    if os.name != "nt":
+        return True
+    try:
+        user32 = ctypes.windll.user32
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return False
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        return pid.value == os.getpid()
+    except (AttributeError, OSError):
+        return True
+
+
 ERROR_ALREADY_EXISTS = 183
 
 
@@ -850,6 +927,7 @@ class Bar(tk.Tk):
         self.spot = None
         self.pop = None
         self.undo = []
+        self.active = True
         self.bar_w = BAR_MIN_W
 
         self.overrideredirect(True)
@@ -880,6 +958,47 @@ class Bar(tk.Tk):
 
         self.refresh()
         self.after(60000, self._tick)
+        self.after(FOCUS_POLL_MS, self._watch_focus)
+
+    # -- focus and pinning --------------------------------------------------
+
+    def panel_should_show(self):
+        """The panel is transient; the bar is the only permanent window.
+
+        Ghost mode is exempt on purpose. Its whole point is reading your
+        tasks while you work in something else, so auto-hiding it there
+        would leave the mode with nothing to do.
+        """
+        if not self.db["panel_open"]:
+            return False
+        if self.db["auto_hide"] and not self.active and self.db["mode"] != "ghost":
+            return False
+        return True
+
+    def _watch_focus(self):
+        active = foreground_is_ours()
+        if active != self.active:
+            self.active = active
+            if not active:
+                # a menu or the search field left open behind us is clutter
+                if self.pop is not None and self.pop.winfo_exists():
+                    self.pop.close()
+                if self.spot is not None and self.spot.winfo_exists():
+                    self.spot.close()
+            self.place_windows()
+        pin_topmost(self)
+        if self.panel.winfo_ismapped():
+            pin_topmost(self.panel)
+        self.after(FOCUS_POLL_MS, self._watch_focus)
+
+    def activate(self, *_):
+        """Claim focus so the panel comes back when the bar is clicked."""
+        self.active = True
+        try:
+            self.focus_force()
+        except tk.TclError:
+            pass
+        self.place_windows()
 
     # -- state --------------------------------------------------------------
 
@@ -912,7 +1031,7 @@ class Bar(tk.Tk):
         lbl = tk.Label(self, text=self.icons[key], font=(self.icon_family, size),
                        fg=fg, bg=BAR_BG, cursor="hand2")
         lbl.place(x=x, y=0, width=ICON_W, height=BAR_H)
-        lbl.bind("<Button-1>", lambda e, w=lbl: cmd(w))
+        lbl.bind("<Button-1>", lambda e, w=lbl: (self.activate(), cmd(w)))
         lbl.bind("<Button-3>", self.menu_event)
         lbl.bind("<Enter>", lambda e: lbl.configure(bg=HOVER_BG, fg=TEXT))
         lbl.bind("<Leave>", lambda e: lbl.configure(bg=BAR_BG, fg=fg))
@@ -1059,6 +1178,7 @@ class Bar(tk.Tk):
     # -- dragging -----------------------------------------------------------
 
     def _press(self, e):
+        self.activate()                   # clicking the bar brings the panel back
         self.drag = [e.x_root, e.y_root, self.winfo_x(), self.winfo_y(), False]
 
     def _move(self, e):
@@ -1143,6 +1263,11 @@ class Bar(tk.Tk):
         self.save()
         self.refresh()
 
+    def toggle_auto_hide(self, *_):
+        self.db["auto_hide"] = not self.db["auto_hide"]
+        self.save()
+        self.refresh()
+
     def toggle_startup(self, *_):
         set_startup(not startup_enabled())
 
@@ -1217,6 +1342,8 @@ class Bar(tk.Tk):
         items += [
             {"label": "Show completed", "checked": bool(self.db["show_done"]),
              "cmd": self.toggle_done},
+            {"label": "Hide panel when unfocused",
+             "checked": bool(self.db["auto_hide"]), "cmd": self.toggle_auto_hide},
             {"label": "Run at login", "checked": startup_enabled(),
              "cmd": self.toggle_startup},
             {"kind": "sep"},
@@ -1416,7 +1543,7 @@ class Panel(tk.Toplevel):
         self._resize_viewport(min(total_h, self.winfo_screenheight() - BAR_H - 2 * BAR_GAP))
 
     def place_near(self, bar_x, bar_y, above):
-        if not self.db["panel_open"]:
+        if not self.bar.panel_should_show():
             self.withdraw()
             return
         self.deiconify()
