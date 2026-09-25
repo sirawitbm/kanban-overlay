@@ -135,6 +135,11 @@ def build(today=None):
         "active": None,
         "filters": [],
         "panel_open": True,
+        # a demo board opens all three modules, docked, so the bar's buttons
+        # have something to show straight away
+        "modules": {key: {"open": True, "pos": None}
+                    for key in ("board", "today", "stats")},
+        "auto_hide": True,
     }
 
 
