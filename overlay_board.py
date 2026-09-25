@@ -248,7 +248,12 @@ DEFAULTS = {
     "active": None,
     "filters": [],
     "panel_open": True,             # legacy; migrated into modules["board"]
-    "auto_hide": True,              # modules only while the app has focus
+    # Off by default. Whether a click actually gives one of these windows
+    # the foreground is not something Windows guarantees for an
+    # overrideredirect overlay, and when the answer is no, auto-hiding
+    # withdraws modules out from under the pointer and looks like the app
+    # ignoring you. Opt in from the menu once you have seen it behave.
+    "auto_hide": False,
     "modules": {},                  # per module: {"open": bool, "pos": [x, y]}
 }
 
@@ -331,7 +336,7 @@ def load_state():
     db["filters"] = [str(f) for f in raw_filters if str(f).strip()]
     db["show_done"] = db["show_done"] if isinstance(db["show_done"], bool) else True
     db["panel_open"] = db["panel_open"] if isinstance(db["panel_open"], bool) else True
-    db["auto_hide"] = db["auto_hide"] if isinstance(db["auto_hide"], bool) else True
+    db["auto_hide"] = db["auto_hide"] if isinstance(db["auto_hide"], bool) else False
     if db["active"] is not None and not isinstance(db["active"], str):
         db["active"] = None
 
@@ -673,6 +678,60 @@ def summarise(tasks, today):
 
 
 # ---------------------------------------------------------------------------
+# win32 prototypes
+# ---------------------------------------------------------------------------
+
+# Every function is declared before it is called. Left undeclared, ctypes
+# assumes a 32-bit int for arguments and return values: that silently works
+# until a window handle happens not to fit, and then raises OverflowError
+# from inside a Tk callback, where the traceback goes nowhere and the click
+# just appears to do nothing. The menu, the task editor and the tray icon
+# each broke in exactly that way.
+
+if os.name == "nt":
+    U = ctypes.WinDLL("user32", use_last_error=True)
+    K = ctypes.WinDLL("kernel32", use_last_error=True)
+    SH = ctypes.WinDLL("shell32", use_last_error=True)
+    LRESULT = ctypes.c_ssize_t
+
+    U.GetAncestor.argtypes = (wintypes.HWND, wintypes.UINT)
+    U.GetAncestor.restype = wintypes.HWND
+    U.SetWindowPos.argtypes = (wintypes.HWND, wintypes.HWND, ctypes.c_int,
+                               ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                               wintypes.UINT)
+    U.SetWindowPos.restype = wintypes.BOOL
+    U.GetForegroundWindow.argtypes = ()
+    U.GetForegroundWindow.restype = wintypes.HWND
+    U.SetForegroundWindow.argtypes = (wintypes.HWND,)
+    U.SetForegroundWindow.restype = wintypes.BOOL
+    U.SetFocus.argtypes = (wintypes.HWND,)
+    U.SetFocus.restype = wintypes.HWND
+    U.BringWindowToTop.argtypes = (wintypes.HWND,)
+    U.BringWindowToTop.restype = wintypes.BOOL
+    U.GetWindowThreadProcessId.argtypes = (wintypes.HWND,
+                                           ctypes.POINTER(wintypes.DWORD))
+    U.GetWindowThreadProcessId.restype = wintypes.DWORD
+    U.AttachThreadInput.argtypes = (wintypes.DWORD, wintypes.DWORD,
+                                    wintypes.BOOL)
+    U.AttachThreadInput.restype = wintypes.BOOL
+    U.SystemParametersInfoW.argtypes = (wintypes.UINT, wintypes.UINT,
+                                        wintypes.LPVOID, wintypes.UINT)
+    U.SystemParametersInfoW.restype = wintypes.BOOL
+    U.MessageBoxW.argtypes = (wintypes.HWND, wintypes.LPCWSTR,
+                              wintypes.LPCWSTR, wintypes.UINT)
+    U.MessageBoxW.restype = ctypes.c_int
+    K.GetCurrentThreadId.argtypes = ()
+    K.GetCurrentThreadId.restype = wintypes.DWORD
+    K.GetModuleHandleW.argtypes = (wintypes.LPCWSTR,)
+    K.GetModuleHandleW.restype = wintypes.HMODULE
+    K.CreateMutexW.argtypes = (wintypes.LPVOID, wintypes.BOOL,
+                               wintypes.LPCWSTR)
+    K.CreateMutexW.restype = wintypes.HANDLE
+    K.CloseHandle.argtypes = (wintypes.HANDLE,)
+    K.CloseHandle.restype = wintypes.BOOL
+
+
+# ---------------------------------------------------------------------------
 # win32 odds and ends
 # ---------------------------------------------------------------------------
 
@@ -683,12 +742,13 @@ def work_area():
     when it is docked to a side or the top, so the bar can park on it instead
     of guessing at the bottom of the screen.
     """
+    if os.name != "nt":
+        return None
     try:
         r = wintypes.RECT()
-        ok = ctypes.windll.user32.SystemParametersInfoW(0x0030, 0,
-                                                        ctypes.byref(r), 0)
+        ok = U.SystemParametersInfoW(0x0030, 0, ctypes.byref(r), 0)
         return (r.left, r.top, r.right, r.bottom) if ok else None
-    except (AttributeError, OSError):
+    except (AttributeError, OSError, ValueError):
         return None
 
 
@@ -708,8 +768,8 @@ def _hwnd(widget):
     if os.name != "nt":
         return handle
     try:
-        return ctypes.windll.user32.GetAncestor(handle, GA_ROOT) or handle
-    except (AttributeError, OSError):
+        return U.GetAncestor(handle, GA_ROOT) or handle
+    except (AttributeError, OSError, ValueError):
         return handle
 
 
@@ -725,14 +785,45 @@ def pin_topmost(widget):
     if os.name != "nt":
         return
     try:
-        user32 = ctypes.windll.user32
-        user32.SetWindowPos.argtypes = (
-            wintypes.HWND, ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
-            ctypes.c_int, ctypes.c_int, wintypes.UINT)
-        user32.SetWindowPos(_hwnd(widget), ctypes.c_void_p(HWND_TOPMOST),
-                            0, 0, 0, 0,
-                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
-    except (AttributeError, OSError, tk.TclError):
+        U.SetWindowPos(_hwnd(widget), HWND_TOPMOST, 0, 0, 0, 0,
+                       SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+    except (AttributeError, OSError, ValueError, tk.TclError):
+        pass
+
+
+def force_foreground(widget):
+    """Make one of our windows the real foreground window.
+
+    Clicking an overrideredirect Tk window does not activate it on Windows -
+    measured, not assumed. So focus_force alone leaves the keyboard pointed
+    at whatever was in front (you cannot type into the task field), and every
+    foreground-based decision sees us as inactive while the user is actively
+    clicking on us.
+
+    Windows refuses SetForegroundWindow to a process that did not receive the
+    last input, so borrow the foreground thread's input queue for the call.
+    """
+    if os.name != "nt":
+        return
+    try:
+        hwnd = _hwnd(widget)
+        current = U.GetForegroundWindow()
+        if not current or current == hwnd:
+            U.SetForegroundWindow(hwnd)
+            U.SetFocus(hwnd)
+            return
+        theirs = U.GetWindowThreadProcessId(current, None)
+        ours = K.GetCurrentThreadId()
+        attached = bool(theirs and theirs != ours
+                        and U.AttachThreadInput(theirs, ours, True))
+        try:
+            U.SetForegroundWindow(hwnd)
+            U.BringWindowToTop(hwnd)
+            U.SetFocus(hwnd)             # this is what routes the keyboard
+        finally:
+            if attached:
+                U.AttachThreadInput(theirs, ours, False)
+    except (AttributeError, OSError, ValueError, tk.TclError):
         pass
 
 
@@ -746,14 +837,13 @@ def foreground_is_ours():
     if os.name != "nt":
         return True
     try:
-        user32 = ctypes.windll.user32
-        hwnd = user32.GetForegroundWindow()
+        hwnd = U.GetForegroundWindow()
         if not hwnd:
             return False
         pid = wintypes.DWORD()
-        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        U.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
         return pid.value == os.getpid()
-    except (AttributeError, OSError):
+    except (AttributeError, OSError, ValueError):
         return True
 
 
@@ -772,16 +862,12 @@ def acquire_single_instance(name="Local\\OverlayBoard"):
     global _INSTANCE_HANDLE
     if os.name != "nt":
         return True
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.CreateMutexW.argtypes = (wintypes.LPVOID, wintypes.BOOL,
-                                      wintypes.LPCWSTR)
-    kernel32.CreateMutexW.restype = wintypes.HANDLE
-    handle = kernel32.CreateMutexW(None, False, name)
+    handle = K.CreateMutexW(None, False, name)
     err = ctypes.get_last_error()
     if not handle:
         return True                     # fail open rather than block launch
     if err == ERROR_ALREADY_EXISTS:
-        kernel32.CloseHandle(handle)
+        K.CloseHandle(handle)
         return False
     _INSTANCE_HANDLE = handle
     return True
@@ -790,7 +876,7 @@ def acquire_single_instance(name="Local\\OverlayBoard"):
 def release_single_instance():
     global _INSTANCE_HANDLE
     if _INSTANCE_HANDLE and os.name == "nt":
-        ctypes.windll.kernel32.CloseHandle(_INSTANCE_HANDLE)
+        K.CloseHandle(_INSTANCE_HANDLE)
     _INSTANCE_HANDLE = None
 
 
@@ -1504,7 +1590,10 @@ class BoardModule(Module):
         if self.ghost:
             self.bar.toggle_mode()
         self._set_scroll(self.content_h - self.viewport_h)
-        self.focus_force()               # overrideredirect windows need a shove
+        # without the foreground grab the keystrokes go to whatever was in
+        # front, and the field looks focused but ignores the keyboard
+        force_foreground(self)
+        self.focus_force()
         self.entry.focus_set()
 
     def cancel_entry(self, e=None):
@@ -1716,10 +1805,6 @@ if os.name == "nt":
 
     # Without argtypes ctypes guesses a 32-bit int for the handed-back LPARAM
     # and raises on anything larger, which on a 64-bit build is most messages.
-    _DEF_WNDPROC = ctypes.windll.user32.DefWindowProcW
-    _DEF_WNDPROC.argtypes = (wintypes.HWND, wintypes.UINT, wintypes.WPARAM,
-                             wintypes.LPARAM)
-    _DEF_WNDPROC.restype = ctypes.c_ssize_t
 
     class WNDCLASSW(ctypes.Structure):
         _fields_ = [("style", wintypes.UINT),
@@ -1749,6 +1834,39 @@ if os.name == "nt":
                     ("dwInfoFlags", wintypes.DWORD),
                     ("guidItem", ctypes.c_byte * 16),
                     ("hBalloonIcon", wintypes.HICON)]
+
+    U.RegisterClassW.argtypes = (ctypes.POINTER(WNDCLASSW),)
+    U.RegisterClassW.restype = wintypes.ATOM
+    U.CreateWindowExW.argtypes = (wintypes.DWORD, wintypes.LPCWSTR,
+                                  wintypes.LPCWSTR, wintypes.DWORD,
+                                  ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                  ctypes.c_int, wintypes.HWND, wintypes.HMENU,
+                                  wintypes.HINSTANCE, wintypes.LPVOID)
+    U.CreateWindowExW.restype = wintypes.HWND
+    U.DestroyWindow.argtypes = (wintypes.HWND,)
+    U.DestroyWindow.restype = wintypes.BOOL
+    U.DefWindowProcW.argtypes = (wintypes.HWND, wintypes.UINT,
+                                 wintypes.WPARAM, wintypes.LPARAM)
+    U.DefWindowProcW.restype = LRESULT
+    U.PeekMessageW.argtypes = (ctypes.POINTER(wintypes.MSG), wintypes.HWND,
+                               wintypes.UINT, wintypes.UINT, wintypes.UINT)
+    U.PeekMessageW.restype = wintypes.BOOL
+    U.TranslateMessage.argtypes = (ctypes.POINTER(wintypes.MSG),)
+    U.TranslateMessage.restype = wintypes.BOOL
+    U.DispatchMessageW.argtypes = (ctypes.POINTER(wintypes.MSG),)
+    U.DispatchMessageW.restype = LRESULT
+    U.RegisterWindowMessageW.argtypes = (wintypes.LPCWSTR,)
+    U.RegisterWindowMessageW.restype = wintypes.UINT
+    U.LoadIconW.argtypes = (wintypes.HINSTANCE, wintypes.LPCWSTR)
+    U.LoadIconW.restype = wintypes.HICON
+    U.LoadImageW.argtypes = (wintypes.HINSTANCE, wintypes.LPCWSTR,
+                             wintypes.UINT, ctypes.c_int, ctypes.c_int,
+                             wintypes.UINT)
+    U.LoadImageW.restype = wintypes.HANDLE
+    SH.Shell_NotifyIconW.argtypes = (wintypes.DWORD,
+                                     ctypes.POINTER(NOTIFYICONDATAW))
+    SH.Shell_NotifyIconW.restype = wintypes.BOOL
+    _DEF_WNDPROC = U.DefWindowProcW
 
 
 class TrayIcon:
@@ -1805,40 +1923,32 @@ class TrayIcon:
     # -- setup --------------------------------------------------------------
 
     def _load_icon(self):
-        user32 = ctypes.windll.user32
-        user32.LoadIconW.argtypes = (wintypes.HINSTANCE, wintypes.LPCWSTR)
-        user32.LoadIconW.restype = wintypes.HICON
         # a packaged build carries the icon as resource 1 of the exe itself
-        inst = ctypes.windll.kernel32.GetModuleHandleW(None)
-        icon = user32.LoadIconW(inst, ctypes.cast(ctypes.c_void_p(1),
-                                                  wintypes.LPCWSTR))
+        inst = K.GetModuleHandleW(None)
+        icon = U.LoadIconW(inst, ctypes.cast(ctypes.c_void_p(1),
+                                             wintypes.LPCWSTR))
         if icon:
             return icon
         for path in (APP_DIR / "OverlayBoard.ico",
                      HERE / "assets" / "OverlayBoard.ico"):
             if path.exists():
-                user32.LoadImageW.restype = wintypes.HANDLE
-                icon = user32.LoadImageW(None, str(path), IMAGE_ICON, 0, 0,
-                                         LR_LOADFROMFILE | LR_DEFAULTSIZE)
+                icon = U.LoadImageW(None, str(path), IMAGE_ICON, 0, 0,
+                                    LR_LOADFROMFILE | LR_DEFAULTSIZE)
                 if icon:
                     return icon
         return None
 
     def _create(self):
-        user32 = ctypes.windll.user32
-        kernel32 = ctypes.windll.kernel32
-
         # the callback must outlive the window, or Python frees it and the
         # first tray click jumps into reclaimed memory
         self._proc = WNDPROC(self._wndproc)
         self._cls = WNDCLASSW()
         self._cls.lpfnWndProc = self._proc
-        self._cls.hInstance = kernel32.GetModuleHandleW(None)
+        self._cls.hInstance = K.GetModuleHandleW(None)
         self._cls.lpszClassName = self.CLASS_NAME
-        user32.RegisterClassW(ctypes.byref(self._cls))
+        U.RegisterClassW(ctypes.byref(self._cls))
 
-        user32.CreateWindowExW.restype = wintypes.HWND
-        self.hwnd = user32.CreateWindowExW(
+        self.hwnd = U.CreateWindowExW(
             WS_EX_TOOLWINDOW, self.CLASS_NAME, "Overlay Board", 0,
             0, 0, 0, 0, None, None, self._cls.hInstance, None)
         if not self.hwnd:
@@ -1846,7 +1956,7 @@ class TrayIcon:
 
         # Explorer broadcasts this when it restarts, having dropped every
         # tray icon on the way down; re-adding is the only way back
-        self._taskbar_created = user32.RegisterWindowMessageW("TaskbarCreated")
+        self._taskbar_created = U.RegisterWindowMessageW("TaskbarCreated")
 
     def _shell_add(self):
         icon = self._load_icon()
@@ -1858,8 +1968,7 @@ class TrayIcon:
         nid.uCallbackMessage = TRAY_CALLBACK
         nid.hIcon = icon or 0
         nid.szTip = "Overlay Board"
-        if not ctypes.windll.shell32.Shell_NotifyIconW(NIM_ADD,
-                                                       ctypes.byref(nid)):
+        if not SH.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid)):
             return False
         self.nid = nid
         return True
@@ -1886,12 +1995,11 @@ class TrayIcon:
         if not self.hwnd:
             return
         try:
-            user32 = ctypes.windll.user32
             msg = wintypes.MSG()
-            while user32.PeekMessageW(ctypes.byref(msg), self.hwnd,
-                                      0, 0, PM_REMOVE):
-                user32.TranslateMessage(ctypes.byref(msg))
-                user32.DispatchMessageW(ctypes.byref(msg))
+            while U.PeekMessageW(ctypes.byref(msg), self.hwnd,
+                                 0, 0, PM_REMOVE):
+                U.TranslateMessage(ctypes.byref(msg))
+                U.DispatchMessageW(ctypes.byref(msg))
         except Exception:                          # noqa: BLE001
             pass
         self.bar.after(TRAY_PUMP_MS, self._pump)
@@ -1899,11 +2007,10 @@ class TrayIcon:
     def remove(self):
         try:
             if self.nid is not None:
-                ctypes.windll.shell32.Shell_NotifyIconW(NIM_DELETE,
-                                                        ctypes.byref(self.nid))
+                SH.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(self.nid))
                 self.nid = None
             if self.hwnd:
-                ctypes.windll.user32.DestroyWindow(self.hwnd)
+                U.DestroyWindow(self.hwnd)
                 self.hwnd = None
         except Exception:                          # noqa: BLE001
             pass
@@ -2002,12 +2109,37 @@ class Bar(tk.Tk):
         if self.spot is not None and self.spot.winfo_exists():
             self.spot.close()
 
+    def pointer_over_ours(self):
+        """Is the mouse inside one of our windows?
+
+        The deciding signal, because these windows do not reliably take the
+        foreground when clicked. Without it the poll withdraws a module out
+        from under the cursor mid-click, which reads as "it ignores me".
+        The scrim is excluded on purpose: it covers the whole screen.
+        """
+        x, y = self.winfo_pointerx(), self.winfo_pointery()
+        windows = [self] + list(self.modules)
+        for extra in (self.pop, self.spot):
+            if extra is not None and extra.winfo_exists():
+                windows.append(extra)
+        for w in windows:
+            try:
+                if not w.winfo_ismapped():
+                    continue
+                wx, wy = w.winfo_rootx(), w.winfo_rooty()
+                if (wx <= x < wx + w.winfo_width()
+                        and wy <= y < wy + w.winfo_height()):
+                    return True
+            except tk.TclError:
+                continue
+        return False
+
     def _watch_focus(self):
-        active = foreground_is_ours()
+        # never close a menu from here: it has a scrim and Escape for that,
+        # and doing it on a poll was destroying menus mid-click
+        active = foreground_is_ours() or self.pointer_over_ours()
         if active != self.active:
             self.active = active
-            if not active:
-                self.close_overlays()
             self.place_windows()
 
         # Re-pinning re-inserts a window at the top of the topmost band, so
@@ -2026,6 +2158,7 @@ class Bar(tk.Tk):
     def activate(self, *_):
         """Claim focus so the modules come back when the bar is clicked."""
         self.active = True
+        force_foreground(self)
         try:
             self.focus_force()
         except tk.TclError:
@@ -2408,6 +2541,7 @@ class Bar(tk.Tk):
 
     def tray_menu(self):
         self.active = True
+        force_foreground(self)
         try:
             self.focus_force()
         except tk.TclError:
@@ -2655,7 +2789,7 @@ class Spotlight(tk.Toplevel):
 
 def main():
     if not acquire_single_instance():
-        ctypes.windll.user32.MessageBoxW(
+        U.MessageBoxW(
             None, "Overlay Board is already running.", "Overlay Board", 0x40)
         return
     try:

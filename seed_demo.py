@@ -139,7 +139,7 @@ def build(today=None):
         # have something to show straight away
         "modules": {key: {"open": True, "pos": None}
                     for key in ("board", "today", "stats")},
-        "auto_hide": True,
+        "auto_hide": False,
     }
 
 
