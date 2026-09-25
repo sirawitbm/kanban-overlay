@@ -10,7 +10,9 @@ wants the whole screen.
 
 No dependencies. One file, standard-library `tkinter`, Python 3.9+.
 
-![The bar on the taskbar with the Board module unfolded above it](docs/board.png)
+![Just the bar, docked in the taskbar beside the tray, with nothing else on screen](docs/bar.png)
+
+That strip beside the clock is the whole app until you want more of it.
 
 ## Download
 
@@ -48,9 +50,10 @@ overwrite an existing board unless you pass `--force`, and keeps a `.bak`.
 
 ## The bar and its modules
 
-**The bar** is the always-visible strip. On first run it finds your real
-taskbar via `SPI_GETWORKAREA` and parks itself on it, but you can drag it
-anywhere, including inside the taskbar area, and it remembers. It carries
+**The bar** is the always-visible strip. On first run it parks inside your
+taskbar, in the free stretch just left of the tray — clear of Start and your
+pinned apps, which Windows 11 centres. Drag it anywhere, including elsewhere
+on the taskbar, and it remembers. It carries
 the module buttons and two numbers —
 **due today** and **overdue** — and deliberately nothing else: it shares the
 taskbar, so every extra field costs length that has to come from somewhere.
@@ -104,6 +107,8 @@ Exclusive-fullscreen games still cover everything; nothing short of an
 overlay hook changes that.
 
 ## Sections are time, not stages
+
+![The Board module, with next month split into weeks and one week into days](docs/board.png)
 
 Most boards ask you to sort work into To Do / Doing / Done columns. This one
 sorts by *when*, and re-sorts itself as the list grows:

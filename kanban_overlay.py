@@ -154,6 +154,7 @@ BAR_H = 34                          # tuned to sit inside a default taskbar
 BAR_MIN_W = 300
 BAR_PAD = 9
 BAR_GAP = 6                         # bar to panel
+TRAY_GAP = 16                       # bar to the notification area when docked
 ICON_W = 26
 METER_H = 5
 CHIP_H = 20
@@ -861,6 +862,27 @@ def pin_topmost(widget):
                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
     except (AttributeError, OSError, ValueError, tk.TclError):
         pass
+
+
+def notify_area_left():
+    """Left edge of the primary taskbar's notification area, or None.
+
+    TrayNotifyWnd is the clock-and-icons block at the right end of the
+    taskbar. It survives on Windows 11, whose taskbar is otherwise XAML and
+    opaque to window-class lookups, which makes it the one landmark that
+    reliably marks where the free space on the right of the taskbar ends.
+    """
+    if os.name != "nt":
+        return None
+    try:
+        tray = U.FindWindowW("Shell_TrayWnd", None)
+        notify = U.FindWindowExW(tray, None, "TrayNotifyWnd", None) if tray else None
+        if not notify:
+            return None
+        r = wintypes.RECT()
+        return r.left if U.GetWindowRect(notify, ctypes.byref(r)) else None
+    except (AttributeError, OSError, ValueError):
+        return None
 
 
 def taskbar_for_rect(x, y, width, height):
@@ -2450,12 +2472,23 @@ class Bar(tk.Tk):
     # -- placement ----------------------------------------------------------
 
     def _default_pos(self):
-        """Park on the taskbar if there is one, else at the bottom edge."""
+        """Park on the taskbar, in the free stretch just left of the tray.
+
+        This used to dock dead centre - which on Windows 11, where Start and
+        the pinned apps are centred, put the bar squarely on top of the Start
+        button. The gap between the app icons and the notification area is
+        empty on both the centred and the left-aligned layouts, so that is
+        where it goes; centre is only a fallback if the tray cannot be found.
+        """
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
         wa = work_area()
         if wa and wa[3] < sh:
             tb_h = sh - wa[3]
-            return (sw - self.bar_w) // 2, wa[3] + max(0, (tb_h - BAR_H) // 2)
+            y = wa[3] + max(0, (tb_h - BAR_H) // 2)
+            tray = notify_area_left()
+            if tray is not None and tray - self.bar_w - TRAY_GAP > 0:
+                return tray - self.bar_w - TRAY_GAP, y
+            return (sw - self.bar_w) // 2, y
         return (sw - self.bar_w) // 2, sh - BAR_H - 8
 
     def _panel_above(self):
@@ -2485,16 +2518,33 @@ class Bar(tk.Tk):
         self.after_idle(self._sync_taskbar_owner)
 
         above = self._panel_above()
-        slot = x                          # docked modules queue up beside the bar
         for m in self.modules:
             if not self.module_visible(m):
                 m.withdraw()
-                continue
-            if m.floating:
+            elif m.floating:
                 m.place_floating()
-            else:
-                m.place_docked(slot, y, above)
-                slot += m.win_w + MOD_GAP
+        self._dock_row(x, y, above, area)
+
+    def _dock_row(self, bar_x, bar_y, above, area):
+        """Lay the docked modules out in a row beside the bar.
+
+        The row starts at the bar's left edge and runs right - unless that
+        would run off the monitor, which is the usual case now that the bar
+        parks beside the tray. Then it ends at the bar's right edge and runs
+        left instead, so the modules stack up over free desktop.
+        """
+        docked = [m for m in self.modules
+                  if self.module_visible(m) and not m.floating]
+        if not docked:
+            return
+        total = sum(m.win_w for m in docked) + MOD_GAP * (len(docked) - 1)
+        start = bar_x
+        if bar_x + total > area[2]:
+            start = max(area[0], bar_x + self.bar_w - total)
+        slot = start
+        for m in docked:
+            m.place_docked(slot, bar_y, above)
+            slot += m.win_w + MOD_GAP
 
     def _sync_taskbar_owner(self):
         owner = taskbar_for_rect(self.winfo_x(), self.winfo_y(),
@@ -2525,11 +2575,7 @@ class Bar(tk.Tk):
         area = work_area_at(nx + self.bar_w // 2, ny) or (
             0, 0, self.winfo_screenwidth(), self.winfo_screenheight())
         above = ny > (area[1] + area[3]) // 2
-        slot = nx
-        for m in self.modules:            # docked modules follow the bar
-            if self.module_visible(m) and not m.floating:
-                m.place_docked(slot, ny, above)
-                slot += m.win_w + MOD_GAP
+        self._dock_row(nx, ny, above, area)   # docked modules follow the bar
 
     def _release(self, e):
         if self.drag and self.drag["at"]:
